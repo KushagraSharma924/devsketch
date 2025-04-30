@@ -1,5 +1,5 @@
-import { createBrowserClient } from '@supabase/ssr'
-import { createServerClient } from '@supabase/ssr'
+import { createBrowserClient, createServerClient } from '@supabase/ssr'
+import { type CookieOptions } from '@supabase/ssr'
 import { cookies } from 'next/headers'
 import { type Database } from './types'
 
@@ -17,16 +17,28 @@ export const createClient = () => {
 /**
  * Create a Supabase client for use in server components
  */
-export const createServerComponentClient = () => {
-  const cookieStore = cookies()
-  
+export const createServerComponentClient = async () => {
+  const cookieStore = await cookies()
   return createServerClient<Database>(
     supabaseUrl,
     supabaseAnonKey,
     {
       cookies: {
-        get(name) {
-          return cookieStore.get(name)?.value
+        get(name: string) {
+          try {
+            return cookieStore.get(name)?.value
+          } catch (error) {
+            console.error(`Error getting cookie ${name}:`, error)
+            return undefined
+          }
+        },
+        set(name: string, value: string, options: CookieOptions) {
+          // In Next.js Server Components, we can't set cookies directly from Server Components
+          // This is handled automatically by Supabase Auth
+        },
+        remove(name: string, options: CookieOptions) {
+          // In Next.js Server Components, we can't remove cookies directly from Server Components
+          // This is handled automatically by Supabase Auth
         },
       },
     }
@@ -37,7 +49,7 @@ export const createServerComponentClient = () => {
  * Helper to check authentication status on the server
  */
 export async function isAuthenticated() {
-  const supabase = createServerComponentClient()
+  const supabase = await createServerComponentClient()
   try {
     const { data: { session }, error } = await supabase.auth.getSession()
     return { 
