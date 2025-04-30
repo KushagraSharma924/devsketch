@@ -20,6 +20,43 @@ You can start editing the page by modifying `app/page.tsx`. The page auto-update
 
 This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
 
+## Supabase Setup
+
+This project uses Supabase for authentication and database services. To set up locally:
+
+1. Copy `.env.example` to `.env.local`
+2. Fill in your Supabase URL and Anon Key from your Supabase project dashboard
+
+```bash
+NEXT_PUBLIC_SUPABASE_URL=your_supabase_url_here
+NEXT_PUBLIC_SUPABASE_ANON_KEY=your_supabase_anon_key_here
+```
+
+## GitHub Secrets and Vercel Deployment
+
+To deploy with GitHub CI/CD and Vercel, follow these steps:
+
+1. **Add GitHub Secrets**:
+   - Go to your GitHub repository Settings
+   - Navigate to Secrets and Variables > Actions
+   - Add these repository secrets:
+     - `NEXT_PUBLIC_SUPABASE_URL`: Your Supabase project URL
+     - `NEXT_PUBLIC_SUPABASE_ANON_KEY`: Your Supabase anon key
+     - `VERCEL_TOKEN`: Your Vercel API token
+     - `VERCEL_ORG_ID`: Your Vercel organization ID
+     - `VERCEL_PROJECT_ID`: Your Vercel project ID
+
+2. **Connect to Vercel**:
+   - Go to [Vercel](https://vercel.com) and import your GitHub repository
+   - Vercel will automatically detect your Next.js project
+   - Add the environment variables in the Vercel project settings:
+     - `NEXT_PUBLIC_SUPABASE_URL`
+     - `NEXT_PUBLIC_SUPABASE_ANON_KEY`
+
+3. **Deploy!**
+   - Pushing to the main branch will trigger the GitHub Actions workflow
+   - This will build and deploy your project to Vercel
+
 ## Learn More
 
 To learn more about Next.js, take a look at the following resources:
