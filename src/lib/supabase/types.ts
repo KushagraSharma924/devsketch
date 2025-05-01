@@ -25,6 +25,31 @@ export type Database = {
           full_name?: string | null
           avatar_url?: string | null
         }
+      },
+      designs: {
+        Row: {
+          id: string
+          user_id: string
+          excalidraw_data: any
+          created_at: string
+          updated_at: string
+          session_id: string
+        }
+        Insert: {
+          id?: string
+          user_id: string
+          excalidraw_data: any
+          created_at?: string
+          updated_at?: string
+          session_id: string
+        }
+        Update: {
+          id?: string
+          user_id?: string
+          excalidraw_data?: any
+          updated_at?: string
+          session_id?: string
+        }
       }
     }
     Views: {
