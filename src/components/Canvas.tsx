@@ -5,6 +5,7 @@ import React from 'react';
 import dynamic from 'next/dynamic';
 import { createClient } from '@/lib/supabase/client';
 import { PostgrestError } from '@supabase/supabase-js';
+import { useSearchParams } from 'next/navigation';
 
 // Proper UUID generator that matches PostgreSQL's UUID format
 function generateUUID(): string {
@@ -37,10 +38,13 @@ const Excalidraw = dynamic(
 const supabase = createClient();
 
 export default function Canvas() {
+  const searchParams = useSearchParams();
+  const urlDesignId = searchParams.get('id');
+  
   const [elements, setElements] = useState<readonly any[]>([]);
   const [userId, setUserId] = useState<string | null>(null);
   const [sessionId, setSessionId] = useState<string | null>(null);
-  const [designId, setDesignId] = useState<string | null>(null);
+  const [designId, setDesignId] = useState<string | null>(urlDesignId);
   const excalidrawRef = useRef<any | null>(null);
   const isSaving = useRef(false); // Track ongoing saves to avoid race conditions
   const [isLoading, setIsLoading] = useState(true);
@@ -158,8 +162,35 @@ export default function Canvas() {
           if (!sessionId) setSessionId(newSessionId);
 
           try {
-            // Load most recent design if it exists
-            console.log('Loading designs for user:', user.id);
+            // If we have a design ID from URL, try to load that specific design
+            if (urlDesignId) {
+              console.log('Loading specific design from URL:', urlDesignId);
+              const { data: specificDesign, error: specificError } = await supabase
+                .from('designs')
+                .select('id, excalidraw_data, session_id')
+                .eq('id', urlDesignId)
+                .single();
+                
+              if (specificError) {
+                console.error('Error loading specific design:', specificError);
+                throw specificError;
+              }
+              
+              if (specificDesign?.excalidraw_data && mounted) {
+                console.log('Loaded specific design:', specificDesign.id);
+                setElements(specificDesign.excalidraw_data);
+                setDesignId(specificDesign.id);
+                // If we have a session_id from the design, use it
+                if (specificDesign.session_id) {
+                  setSessionId(specificDesign.session_id);
+                }
+                setIsLoading(false);
+                return;
+              }
+            }
+            
+            // If no URL design ID or it wasn't found, load most recent design as fallback
+            console.log('Loading most recent design for user:', user.id);
             const { data: designData, error } = await supabase
               .from('designs')
               .select('id, excalidraw_data, session_id')
@@ -191,7 +222,8 @@ export default function Canvas() {
                 .insert({
                   user_id: user.id,
                   excalidraw_data: [],
-                  session_id: newSessionId
+                  session_id: newSessionId,
+                  created_by_id: user.id
                 })
                 .select('id')
                 .single();
@@ -226,7 +258,7 @@ export default function Canvas() {
 
     fetchData();
     return () => { mounted = false; };
-  }, [loadFromLocalStorage, sessionId, createLocalDesign]);
+  }, [loadFromLocalStorage, sessionId, createLocalDesign, urlDesignId]);
 
   // Realtime updates (remote changes)
   useEffect(() => {
@@ -342,7 +374,8 @@ export default function Canvas() {
         .insert({
           user_id: userId,
           excalidraw_data: [],
-          session_id: newSessionId
+          session_id: newSessionId,
+          created_by_id: userId
         })
         .select('id')
         .single();

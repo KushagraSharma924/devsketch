@@ -34,6 +34,7 @@ export type Database = {
           created_at: string
           updated_at: string
           session_id: string
+          created_by_id: string | null
         }
         Insert: {
           id?: string
@@ -42,6 +43,7 @@ export type Database = {
           created_at?: string
           updated_at?: string
           session_id: string
+          created_by_id?: string | null
         }
         Update: {
           id?: string
@@ -49,6 +51,7 @@ export type Database = {
           excalidraw_data?: any
           updated_at?: string
           session_id?: string
+          created_by_id?: string | null
         }
       }
     }

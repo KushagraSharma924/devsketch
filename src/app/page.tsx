@@ -1,7 +1,7 @@
 // app/page.tsx
 'use client'
 
-import { FaDiscord, FaLinkedin } from 'react-icons/fa';
+import { FaDiscord, FaLinkedin, FaPlus } from 'react-icons/fa';
 import { IoClose } from 'react-icons/io5';
 import { useState, useEffect, useRef, FormEvent } from 'react';
 import { useRouter } from 'next/navigation';
@@ -22,9 +22,13 @@ export default function Home() {
   const [authLoading, setAuthLoading] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
   const [authMessage, setAuthMessage] = useState<string | null>(null);
+  const [showSidebar, setShowSidebar] = useState(false);
+  const [userDesigns, setUserDesigns] = useState<any[]>([]);
+  const [designsLoading, setDesignsLoading] = useState(false);
   
   const userMenuRef = useRef<HTMLDivElement>(null);
   const authModalRef = useRef<HTMLDivElement>(null);
+  const sidebarRef = useRef<HTMLDivElement>(null);
 
   // Check for authentication status when component mounts
   useEffect(() => {
@@ -58,11 +62,42 @@ export default function Home() {
     };
   }, []);
 
-  // Close user menu when clicking outside
+  // Fetch user designs when user is authenticated
+  useEffect(() => {
+    const fetchUserDesigns = async () => {
+      if (!user) return;
+      
+      try {
+        setDesignsLoading(true);
+        const { data, error } = await supabase
+          .from('designs')
+          .select('id, created_at, session_id')
+          .eq('user_id', user.id)
+          .order('created_at', { ascending: false })
+          .limit(5);
+        
+        if (error) throw error;
+        
+        setUserDesigns(data || []);
+      } catch (error) {
+        console.error('Error fetching user designs:', error);
+      } finally {
+        setDesignsLoading(false);
+      }
+    };
+    
+    fetchUserDesigns();
+  }, [user]);
+
+  // Close user menu and sidebar when clicking outside
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
       if (userMenuRef.current && !userMenuRef.current.contains(event.target as Node)) {
         setShowUserMenu(false);
+      }
+      
+      if (sidebarRef.current && !sidebarRef.current.contains(event.target as Node)) {
+        setShowSidebar(false);
       }
       
       // Don't close auth modal if click is inside the modal
@@ -198,6 +233,37 @@ export default function Home() {
     }
   };
 
+  // Create a new design and navigate to draw page
+  const handleNewDesign = async () => {
+    if (!user) {
+      setShowAuthModal(true);
+      return;
+    }
+    
+    try {
+      const newSessionId = crypto.randomUUID();
+      
+      const { data: newDesign, error } = await supabase
+        .from('designs')
+        .insert({
+          user_id: user.id,
+          excalidraw_data: [],
+          session_id: newSessionId,
+          created_by_id: user.id
+        })
+        .select('id')
+        .single();
+      
+      if (error) throw error;
+      
+      if (newDesign) {
+        router.push('/draw?id=' + newDesign.id);
+      }
+    } catch (error) {
+      console.error('Failed to create new design:', error);
+    }
+  };
+
   // Get user initial for avatar
   const getUserInitial = () => {
     if (user?.user_metadata?.full_name) {
@@ -206,6 +272,17 @@ export default function Home() {
       return user.email.charAt(0).toUpperCase();
     }
     return 'J'; // Default fallback
+  };
+
+  // Format date to human readable format
+  const formatDate = (dateString: string) => {
+    const date = new Date(dateString);
+    return date.toLocaleDateString('en-US', { 
+      month: 'short', 
+      day: 'numeric', 
+      hour: 'numeric', 
+      minute: 'numeric'
+    });
   };
 
   return (
@@ -226,7 +303,10 @@ export default function Home() {
         <div className="absolute bottom-4 left-4" ref={userMenuRef}>
           <div 
             className="w-8 h-8 rounded-full bg-green-400 text-black flex items-center justify-center font-bold text-sm cursor-pointer"
-            onClick={() => setShowUserMenu(!showUserMenu)}
+            onClick={() => {
+              setShowUserMenu(!showUserMenu);
+              setShowSidebar(false);
+            }}
           >
             {getUserInitial()}
           </div>
@@ -239,7 +319,10 @@ export default function Home() {
               </div>
               <div className="py-1">
                 <button 
-                  onClick={() => router.push('/draw')}
+                  onClick={() => {
+                    setShowUserMenu(false);
+                    setShowSidebar(!showSidebar);
+                  }}
                   className="w-full text-left px-4 py-2 text-sm hover:bg-neutral-800 transition-colors"
                 >
                   My Designs
@@ -250,6 +333,45 @@ export default function Home() {
                 >
                   Sign Out
                 </button>
+              </div>
+            </div>
+          )}
+          
+          {/* Sidebar drawer */}
+          {showSidebar && (
+            <div className="absolute bottom-0 left-full ml-2 w-64 bg-[#111] border border-neutral-700 rounded-lg shadow-lg z-10 overflow-hidden"
+                 ref={sidebarRef}>
+              <div className="px-4 py-3 border-b border-neutral-700 flex items-center justify-between">
+                <h3 className="text-sm font-medium">Recent Designs</h3>
+                <button 
+                  onClick={handleNewDesign}
+                  className="text-blue-400 hover:text-blue-300 text-sm flex items-center"
+                >
+                  <FaPlus className="mr-1" size={12} />
+                  New
+                </button>
+              </div>
+              <div className="py-1 max-h-[calc(70vh-40px)] overflow-auto">
+                {designsLoading ? (
+                  <div className="flex justify-center py-4">
+                    <div className="w-5 h-5 border-2 border-t-2 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
+                  </div>
+                ) : userDesigns.length === 0 ? (
+                  <div className="px-4 py-3 text-sm text-gray-400">
+                    No designs yet. Create your first design!
+                  </div>
+                ) : (
+                  userDesigns.map((design) => (
+                    <button
+                      key={design.id}
+                      onClick={() => router.push(`/draw?id=${design.id}`)}
+                      className="w-full text-left px-4 py-2 text-sm hover:bg-neutral-800 transition-colors border-b border-neutral-700 last:border-b-0"
+                    >
+                      <div className="font-medium truncate">Design {design.id.slice(0, 8)}...</div>
+                      <div className="text-xs text-gray-400">{formatDate(design.created_at)}</div>
+                    </button>
+                  ))
+                )}
               </div>
             </div>
           )}
