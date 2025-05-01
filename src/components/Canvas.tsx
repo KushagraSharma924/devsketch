@@ -8,8 +8,7 @@ import { PostgrestError } from '@supabase/supabase-js';
 
 // Proper UUID generator that matches PostgreSQL's UUID format
 function generateUUID(): string {
-  // Format: xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx
-  // Where x is any hexadecimal digit and y is one of 8, 9, A, or B
+ 
   const hexDigits = '0123456789abcdef';
   let uuid = '';
   

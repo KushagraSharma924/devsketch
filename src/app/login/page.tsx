@@ -2,9 +2,10 @@
 
 import Auth from '@/components/Auth';
 import { useSearchParams } from 'next/navigation';
-import { useEffect, useState } from 'react';
+import { useEffect, useState, Suspense } from 'react';
 
-export default function LoginPage() {
+// Separate component that uses useSearchParams
+function LoginContent() {
   const searchParams = useSearchParams();
   const [error, setError] = useState<string | null>(null);
   const nextPath = searchParams.get('next') || '/draw';
@@ -38,5 +39,24 @@ export default function LoginPage() {
         <Auth redirectPath={nextPath} />
       </div>
     </div>
+  );
+}
+
+// Loading fallback component
+function LoginLoading() {
+  return (
+    <div className="min-h-screen flex flex-col items-center justify-center py-12 bg-gray-50">
+      <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-blue-500 mb-4"></div>
+      <p className="text-gray-600">Loading login page...</p>
+    </div>
+  );
+}
+
+// Main component with Suspense boundary
+export default function LoginPage() {
+  return (
+    <Suspense fallback={<LoginLoading />}>
+      <LoginContent />
+    </Suspense>
   );
 } 
