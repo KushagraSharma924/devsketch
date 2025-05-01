@@ -1,8 +1,9 @@
 // app/page.tsx
 'use client'
 
-import { FaDiscord, FaLinkedin, FaPlus } from 'react-icons/fa';
+import { FaDiscord, FaLinkedin, FaPlus, FaBars, FaUser, FaCreditCard, FaQuestionCircle, FaCog } from 'react-icons/fa';
 import { IoClose } from 'react-icons/io5';
+import { RiLogoutBoxRLine } from 'react-icons/ri';
 import { useState, useEffect, useRef, FormEvent } from 'react';
 import { useRouter } from 'next/navigation';
 import { createClient } from '@/lib/supabase/client';
@@ -25,6 +26,8 @@ export default function Home() {
   const [showSidebar, setShowSidebar] = useState(false);
   const [userDesigns, setUserDesigns] = useState<any[]>([]);
   const [designsLoading, setDesignsLoading] = useState(false);
+  const [userChats, setUserChats] = useState<any[]>([]);
+  const [chatsLoading, setChatsLoading] = useState(false);
   
   const userMenuRef = useRef<HTMLDivElement>(null);
   const authModalRef = useRef<HTMLDivElement>(null);
@@ -89,6 +92,159 @@ export default function Home() {
     fetchUserDesigns();
   }, [user]);
 
+  // Fetch user chats when user is authenticated
+  useEffect(() => {
+    const fetchUserChats = async () => {
+      if (!user) return;
+      
+      interface Design {
+        id: string;
+        created_at: string;
+        updated_at?: string;
+        session_id: string;
+      }
+      
+      try {
+        setChatsLoading(true);
+        
+        // Use a simpler, more reliable query first to check table access
+        const { data: testData, error: testError } = await supabase
+          .from('designs')
+          .select('id')
+          .limit(1);
+          
+        if (testError) {
+          console.error('Error accessing designs table:', testError);
+          setUserChats([]);
+          setChatsLoading(false);
+          return;
+        }
+        
+        // If we can access the table, proceed with the full query
+        const { data, error } = await supabase
+          .from('designs')
+          .select('id, created_at, session_id')
+          .eq('user_id', user.id)
+          .order('created_at', { ascending: false });
+        
+        if (error) {
+          console.error('Error fetching designs for chat display:', error);
+          setUserChats([]);
+        } else {
+          // If we have real data, organize designs into time-based categories
+          if (data && data.length > 0) {
+            // Transform design data into chat-like structure with categories
+            const processedChats = [];
+            const designsByMonth = new Map<string, Design[]>();
+            
+            // Group designs by month
+            (data as Design[]).forEach((design: Design) => {
+              const date = new Date(design.created_at);
+              const monthYear = date.toLocaleString('en-US', { month: 'long', year: 'numeric' });
+              
+              if (!designsByMonth.has(monthYear)) {
+                designsByMonth.set(monthYear, []);
+              }
+              
+              designsByMonth.get(monthYear)!.push(design);
+            });
+            
+            // Create "Last 30 Days" category
+            const thirtyDaysAgo = new Date();
+            thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+            
+            const recentDesigns = (data as Design[]).filter((design: Design) => 
+              new Date(design.created_at) >= thirtyDaysAgo
+            );
+            
+            if (recentDesigns.length > 0) {
+              processedChats.push({
+                id: 'category-last-30-days',
+                title: 'Last 30 Days',
+                updated_at: new Date().toISOString(),
+                is_category: true
+              });
+              
+              recentDesigns.forEach((design: Design) => {
+                processedChats.push({
+                  id: design.id,
+                  title: `Design ${design.id.slice(0, 8)}...`,
+                  updated_at: design.created_at,
+                  category: 'Last 30 Days',
+                  design_id: design.id
+                });
+              });
+            }
+            
+            // Add other months as categories
+            designsByMonth.forEach((designs: Design[], monthYear: string) => {
+              // Skip if this is already covered by "Last 30 Days"
+              if (designs.length === 0) return;
+              
+              const firstDesignDate = new Date(designs[0].created_at);
+              if (firstDesignDate >= thirtyDaysAgo) {
+                return;
+              }
+              
+              processedChats.push({
+                id: `category-${monthYear.toLowerCase().replace(' ', '-')}`,
+                title: monthYear,
+                updated_at: designs[0].created_at,
+                is_category: true
+              });
+              
+              designs.forEach((design: Design) => {
+                processedChats.push({
+                  id: `${monthYear.toLowerCase().replace(' ', '-')}-${design.id}`,
+                  title: `Design ${design.id.slice(0, 8)}...`,
+                  updated_at: design.created_at,
+                  category: monthYear,
+                  design_id: design.id
+                });
+              });
+            });
+            
+            setUserChats(processedChats);
+          } else {
+            // If no designs, show empty state
+            setUserChats([]);
+          }
+        }
+      } catch (error) {
+        console.error('Error in processing designs for chat display:', error);
+        setUserChats([]);
+      } finally {
+        setChatsLoading(false);
+      }
+    };
+    
+    fetchUserChats();
+  }, [user]);
+
+  // Generate chat categories and items for display
+  const getChatsByCategory = () => {
+    // First find all categories
+    const categories = userChats.filter(chat => chat.is_category).sort((a, b) => {
+      return new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime();
+    });
+    
+    // Group chats by their categories
+    const result = categories.map(category => {
+      const chatsInCategory = userChats.filter(chat => 
+        !chat.is_category && chat.category === category.title
+      ).sort((a, b) => {
+        return new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime();
+      });
+      
+      return {
+        category,
+        chats: chatsInCategory
+      };
+    });
+    
+    return result;
+  };
+
   // Close user menu and sidebar when clicking outside
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
@@ -97,7 +253,10 @@ export default function Home() {
       }
       
       if (sidebarRef.current && !sidebarRef.current.contains(event.target as Node)) {
-        setShowSidebar(false);
+        // Only close sidebar if clicking anywhere except the sidebar toggle button
+        if (!((event.target as Element).closest('.sidebar-toggle'))) {
+          setShowSidebar(false);
+        }
       }
       
       // Don't close auth modal if click is inside the modal
@@ -227,6 +386,7 @@ export default function Home() {
     try {
       await supabase.auth.signOut();
       setShowUserMenu(false);
+      setShowSidebar(false);
       // Router will automatically update due to auth state change
     } catch (error) {
       console.error('Error signing out:', error);
@@ -285,6 +445,16 @@ export default function Home() {
     });
   };
 
+  // Get display name for the user
+  const getUserDisplayName = () => {
+    if (user?.user_metadata?.full_name) {
+      return user.user_metadata.full_name;
+    } else if (user?.email) {
+      return user.email.split('@')[0];
+    }
+    return 'User';
+  };
+
   return (
     <main className="relative flex flex-col items-center justify-center min-h-screen bg-black text-white font-sans px-4 overflow-hidden">
       
@@ -298,83 +468,133 @@ export default function Home() {
         <IoClose className="hover:text-red-500 cursor-pointer" />
       </div>
 
-      {/* User avatar and menu - only show when logged in */}
+      {/* Sidebar toggle button */}
       {user && (
-        <div className="absolute bottom-4 left-4" ref={userMenuRef}>
           <div 
-            className="w-8 h-8 rounded-full bg-green-400 text-black flex items-center justify-center font-bold text-sm cursor-pointer"
-            onClick={() => {
-              setShowUserMenu(!showUserMenu);
-              setShowSidebar(false);
-            }}
+          className="absolute bottom-4 left-4 cursor-pointer sidebar-toggle"
+          onClick={() => setShowSidebar(!showSidebar)}
           >
+          <div className="w-8 h-8 rounded-full bg-green-400 text-black flex items-center justify-center font-bold text-sm transition-transform hover:scale-110">
             {getUserInitial()}
           </div>
-          
-          {/* User dropdown menu */}
-          {showUserMenu && (
-            <div className="absolute bottom-full mb-2 left-0 w-48 bg-[#111] border border-neutral-700 rounded-lg shadow-lg z-10 overflow-hidden">
-              <div className="px-4 py-3 border-b border-neutral-700">
-                <p className="text-sm font-medium truncate">{user.email}</p>
+        </div>
+      )}
+
+      {/* Left sidebar */}
+      {showSidebar && (
+        <div 
+          ref={sidebarRef} 
+          className="fixed left-0 top-0 bottom-0 w-64 bg-[#111] z-50 flex flex-col"
+        >
+          {/* User profile section */}
+          <div className="bg-[#080808] p-4 border-b border-neutral-800">
+            <div className="flex items-center space-x-3">
+              <div className="w-10 h-10 rounded-full bg-green-400 text-black flex items-center justify-center font-bold text-sm">
+                {getUserInitial()}
               </div>
-              <div className="py-1">
-                <button 
-                  onClick={() => {
-                    setShowUserMenu(false);
-                    setShowSidebar(!showSidebar);
-                  }}
-                  className="w-full text-left px-4 py-2 text-sm hover:bg-neutral-800 transition-colors"
-                >
-                  My Designs
-                </button>
-                <button 
-                  onClick={handleSignOut}
-                  className="w-full text-left px-4 py-2 text-sm text-red-400 hover:bg-neutral-800 transition-colors"
-                >
-                  Sign Out
-                </button>
+              <div className="flex-1 min-w-0">
+                <p className="text-white font-medium truncate">{getUserDisplayName()}</p>
+                <p className="text-gray-400 text-xs truncate">Personal Plan</p>
               </div>
             </div>
-          )}
+          </div>
           
-          {/* Sidebar drawer */}
-          {showSidebar && (
-            <div className="absolute bottom-0 left-full ml-2 w-64 bg-[#111] border border-neutral-700 rounded-lg shadow-lg z-10 overflow-hidden"
-                 ref={sidebarRef}>
-              <div className="px-4 py-3 border-b border-neutral-700 flex items-center justify-between">
-                <h3 className="text-sm font-medium">Recent Designs</h3>
+          {/* Main sidebar content */}
+          <div className="flex-1 overflow-y-auto py-2">
+            {/* Your Chats section */}
+            <div className="px-4 py-2">
+              <h3 className="text-sm font-medium text-white mb-2">Your Chats</h3>
+            </div>
+            
+            {/* Recent section - from database */}
+            <div className="mt-1">
+              {chatsLoading ? (
+                <div className="flex justify-center py-4">
+                  <div className="w-5 h-5 border-2 border-t-2 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
+                </div>
+              ) : getChatsByCategory().length === 0 ? (
+                <div className="px-4 py-2 text-sm text-gray-500">
+                  No chat history
+                </div>
+              ) : (
+                getChatsByCategory().map(({ category, chats }) => (
+                  <div key={category.id} className="mb-4">
+                    <div className="px-4 py-2">
+                      <h4 className="text-sm font-medium text-gray-500">{category.title}</h4>
+                    </div>
+                    <div>
+                      {chats.map(chat => (
+                        <div 
+                          key={chat.id}
+                          onClick={() => chat.design_id && router.push(`/draw?id=${chat.design_id}`)}
+                          className="text-sm text-gray-400 py-1.5 px-6 hover:bg-neutral-800 transition-colors cursor-pointer"
+                        >
+                          {chat.title}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+            
+            {/* Designs header */}
+            <div className="mt-6 px-4 py-2 flex justify-between items-center">
+              <h3 className="text-sm font-medium text-gray-300">Your Designs</h3>
+              <button 
+                onClick={handleNewDesign}
+                className="text-blue-400 hover:text-blue-300 text-xs flex items-center"
+              >
+                <FaPlus className="mr-1" size={10} />
+                New
+              </button>
+            </div>
+            
+            {/* Designs list */}
+            <div className="mt-1">
+              {designsLoading ? (
+                <div className="flex justify-center py-4">
+                  <div className="w-5 h-5 border-2 border-t-2 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
+                </div>
+              ) : userDesigns.length === 0 ? (
+                <div className="px-4 py-2 text-sm text-gray-500">
+                  No designs yet
+                </div>
+              ) : (
+                <div>
+                  {userDesigns.map((design) => (
                 <button 
-                  onClick={handleNewDesign}
-                  className="text-blue-400 hover:text-blue-300 text-sm flex items-center"
-                >
-                  <FaPlus className="mr-1" size={12} />
-                  New
-                </button>
-              </div>
-              <div className="py-1 max-h-[calc(70vh-40px)] overflow-auto">
-                {designsLoading ? (
-                  <div className="flex justify-center py-4">
-                    <div className="w-5 h-5 border-2 border-t-2 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
-                  </div>
-                ) : userDesigns.length === 0 ? (
-                  <div className="px-4 py-3 text-sm text-gray-400">
-                    No designs yet. Create your first design!
-                  </div>
-                ) : (
-                  userDesigns.map((design) => (
-                    <button
                       key={design.id}
                       onClick={() => router.push(`/draw?id=${design.id}`)}
-                      className="w-full text-left px-4 py-2 text-sm hover:bg-neutral-800 transition-colors border-b border-neutral-700 last:border-b-0"
-                    >
+                  className="w-full text-left px-4 py-2 text-sm hover:bg-neutral-800 transition-colors"
+                >
                       <div className="font-medium truncate">Design {design.id.slice(0, 8)}...</div>
-                      <div className="text-xs text-gray-400">{formatDate(design.created_at)}</div>
-                    </button>
-                  ))
-                )}
-              </div>
+                      <div className="text-xs text-gray-500">{formatDate(design.created_at)}</div>
+                </button>
+                  ))}
+                </div>
+              )}
             </div>
-          )}
+          </div>
+          
+          {/* Bottom menu items */}
+          <div className="border-t border-neutral-800 py-2">
+            <div className="px-4 py-2 flex items-center space-x-3 text-gray-300 cursor-pointer hover:bg-neutral-800">
+              <FaCog className="text-lg" />
+              <span className="text-sm">Settings</span>
+            </div>
+            <div className="px-4 py-2 flex items-center space-x-3 text-gray-300 cursor-pointer hover:bg-neutral-800">
+              <FaUser className="text-lg" />
+              <span className="text-sm">Select Account</span>
+            </div>
+            <div 
+                  onClick={handleSignOut}
+              className="px-4 py-2 flex items-center space-x-3 text-gray-300 cursor-pointer hover:bg-neutral-800"
+                >
+              <RiLogoutBoxRLine className="text-lg" />
+              <span className="text-sm">Sign Out</span>
+            </div>
+          </div>
         </div>
       )}
 
