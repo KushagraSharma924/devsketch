@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, Suspense } from 'react';
 import Canvas from '@/components/Canvas';
 import CodeEditor from '@/components/CodeEditor';
 import { useEditorStore } from '@/lib/store/editor-store';
@@ -32,7 +32,8 @@ function generateUUID(): string {
 
 const supabase = createClient();
 
-export default function DrawPage() {
+// Wrap the part that uses useSearchParams in a separate component
+function DrawPageContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const urlDesignId = searchParams.get('id');
@@ -298,5 +299,18 @@ export default function DrawPage() {
         </div>
       </div>
     </div>
+  );
+}
+
+export default function DrawPage() {
+  return (
+    <Suspense fallback={
+      <div className="flex flex-col items-center justify-center min-h-screen">
+        <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-blue-500 mb-4"></div>
+        <p className="text-gray-600">Loading drawing canvas...</p>
+      </div>
+    }>
+      <DrawPageContent />
+    </Suspense>
   );
 }
