@@ -372,24 +372,15 @@ export default function Home() {
     }
   }
 
+  // Handle Draw design button click
   const handleDrawDesignClick = () => {
-    if (user) {
-      // User is logged in, redirect to draw page
-      router.push('/draw');
-    } else {
-      // User is not logged in, show auth modal
+    if (!user) {
+      // User is not logged in, show login modal
       setShowAuthModal(true);
-    }
-  };
-
-  const handleSignOut = async () => {
-    try {
-      await supabase.auth.signOut();
-      setShowUserMenu(false);
-      setShowSidebar(false);
-      // Router will automatically update due to auth state change
-    } catch (error) {
-      console.error('Error signing out:', error);
+    } else {
+      // User is logged in, navigate directly to draw page
+      // No need to create a design here, it will be created in the DrawPage
+      router.push('/draw');
     }
   };
 
@@ -400,27 +391,18 @@ export default function Home() {
       return;
     }
     
+    // Navigate to draw page without ID, which will create a new design
+    router.push('/draw');
+  };
+
+  const handleSignOut = async () => {
     try {
-      const newSessionId = crypto.randomUUID();
-      
-      const { data: newDesign, error } = await supabase
-        .from('designs')
-        .insert({
-          user_id: user.id,
-          excalidraw_data: [],
-          session_id: newSessionId,
-          created_by_id: user.id
-        })
-        .select('id')
-        .single();
-      
-      if (error) throw error;
-      
-      if (newDesign) {
-        router.push('/draw?id=' + newDesign.id);
-      }
+      await supabase.auth.signOut();
+      setShowUserMenu(false);
+      setShowSidebar(false);
+      // Router will automatically update due to auth state change
     } catch (error) {
-      console.error('Failed to create new design:', error);
+      console.error('Error signing out:', error);
     }
   };
 

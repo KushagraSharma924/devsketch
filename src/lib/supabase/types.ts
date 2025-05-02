@@ -31,6 +31,7 @@ export type Database = {
           id: string
           user_id: string
           excalidraw_data: any
+          code: string | null
           created_at: string
           updated_at: string
           session_id: string
@@ -40,6 +41,7 @@ export type Database = {
           id?: string
           user_id: string
           excalidraw_data: any
+          code?: string | null
           created_at?: string
           updated_at?: string
           session_id: string
@@ -49,6 +51,7 @@ export type Database = {
           id?: string
           user_id?: string
           excalidraw_data?: any
+          code?: string | null
           updated_at?: string
           session_id?: string
           created_by_id?: string | null

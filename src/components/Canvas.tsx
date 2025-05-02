@@ -5,7 +5,7 @@ import React from 'react';
 import dynamic from 'next/dynamic';
 import { createClient } from '@/lib/supabase/client';
 import { PostgrestError } from '@supabase/supabase-js';
-import { useSearchParams } from 'next/navigation';
+import { useSearchParams, useRouter } from 'next/navigation';
 
 // Proper UUID generator that matches PostgreSQL's UUID format
 function generateUUID(): string {
@@ -40,6 +40,7 @@ const supabase = createClient();
 export default function Canvas() {
   const searchParams = useSearchParams();
   const urlDesignId = searchParams.get('id');
+  const router = useRouter();
   
   const [elements, setElements] = useState<readonly any[]>([]);
   const [userId, setUserId] = useState<string | null>(null);
@@ -189,6 +190,14 @@ export default function Canvas() {
               }
             }
             
+            // If we get here and there's no design ID, the DrawPage component should be handling
+            // the creation of a new design, so we should wait for the URL to be updated
+            if (!urlDesignId) {
+              console.log('No design ID in URL, waiting for DrawPage to create one...');
+              setIsLoading(true);
+              return;
+            }
+            
             // If no URL design ID or it wasn't found, load most recent design as fallback
             console.log('Loading most recent design for user:', user.id);
             const { data: designData, error } = await supabase
@@ -236,6 +245,11 @@ export default function Canvas() {
               if (newDesign && mounted) {
                 console.log('New design created with ID:', newDesign.id);
                 setDesignId(newDesign.id);
+                
+                // Update URL with the new design ID 
+                if (!urlDesignId) {
+                  router.replace(`/draw?id=${newDesign.id}`);
+                }
               }
             }
           } catch (dbError) {
@@ -248,17 +262,54 @@ export default function Canvas() {
         console.error('Authentication or data loading error in Canvas component:', error instanceof Error ? error.message : JSON.stringify(error));
         if (mounted) {
           setSupabaseError(error instanceof Error ? error : new Error('Authentication failed'));
-          // Try to load from local storage as fallback
-          loadFromLocalStorage();
         }
       } finally {
-        if (mounted) setIsLoading(false);
+        if (mounted) {
+          setIsLoading(false);
+        }
       }
     };
 
     fetchData();
     return () => { mounted = false; };
-  }, [loadFromLocalStorage, sessionId, createLocalDesign, urlDesignId]);
+  }, [urlDesignId, createLocalDesign, sessionId]);
+
+  // Watch for URL changes - this is important when DrawPage creates a new design
+  useEffect(() => {
+    if (urlDesignId && urlDesignId !== designId) {
+      setDesignId(urlDesignId);
+      setIsLoading(true);
+      
+      const loadDesignFromUrl = async () => {
+        try {
+          console.log('URL design ID changed, loading design:', urlDesignId);
+          const { data: design, error } = await supabase
+            .from('designs')
+            .select('id, excalidraw_data, session_id')
+            .eq('id', urlDesignId)
+            .single();
+            
+          if (error) {
+            console.error('Error loading design from URL change:', error);
+            return;
+          }
+          
+          if (design?.excalidraw_data) {
+            setElements(design.excalidraw_data);
+            if (design.session_id) {
+              setSessionId(design.session_id);
+            }
+          }
+        } catch (err) {
+          console.error('Error loading design after URL change:', err);
+        } finally {
+          setIsLoading(false);
+        }
+      };
+      
+      loadDesignFromUrl();
+    }
+  }, [urlDesignId, designId]);
 
   // Realtime updates (remote changes)
   useEffect(() => {
@@ -337,7 +388,7 @@ export default function Canvas() {
 
   // Auto-save on changes (debounced)
   useEffect(() => {
-    if (elements.length === 0) return;
+    if (!elements || elements.length === 0) return;
 
     const timer = setTimeout(() => {
       // Try Supabase first
@@ -406,7 +457,7 @@ export default function Canvas() {
     setElements(els);
     
     // If this is the first change and not just loading initial data
-    if (els.length > 0 && elements.length === 0) {
+    if (els.length > 0 && (!elements || elements.length === 0)) {
       // Check if we need to create a new session
       if (!designId || (designId.startsWith('local-') && userId)) {
         createNewSession();
@@ -442,17 +493,17 @@ export default function Canvas() {
   // Error display component
   if (excalidrawError) {
     return (
-      <div className="h-screen w-screen">
+      <div className="h-full w-full relative">
         {/* Toast notifications */}
         {toast && (
-          <div className="fixed top-4 right-4 bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded z-50 animate-fade-out">
+          <div className="absolute top-4 right-4 bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded z-50 animate-fade-out">
             {toast}
           </div>
         )}
         
         {/* Supabase connection error toast */}
         {supabaseError && supabaseError instanceof Error && (
-          <div className="fixed top-4 left-4 bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded z-50 flex items-center gap-2">
+          <div className="absolute top-4 left-4 bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded z-50 flex items-center gap-2">
             <div>
               <p className="font-bold">Connection issue</p>
               <p>Changes saving to local storage only</p>
@@ -485,17 +536,17 @@ export default function Canvas() {
   }
 
   return (
-    <div className="h-screen w-screen">
+    <div className="h-full w-full relative">
       {/* Toast notifications */}
       {toast && (
-        <div className="fixed top-4 right-4 bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded z-50 animate-fade-out">
+        <div className="absolute top-4 right-4 bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded z-50 animate-fade-out">
           {toast}
         </div>
       )}
       
       {/* Supabase connection error toast */}
       {supabaseError && supabaseError instanceof Error && (
-        <div className="fixed top-4 left-4 bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded z-50 flex items-center gap-2">
+        <div className="absolute top-4 left-4 bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded z-50 flex items-center gap-2">
           <div>
             <p className="font-bold">Connection issue</p>
             <p>Changes saving to local storage only</p>
@@ -536,6 +587,17 @@ export default function Canvas() {
               excalidrawAPI={(api) => (excalidrawRef.current = api)}
               onChange={onChangeHandler}
               initialData={{ elements }}
+              UIOptions={{
+                canvasActions: {
+                  changeViewBackgroundColor: true,
+                  clearCanvas: true,
+                  export: { saveFileToDisk: true },
+                  loadScene: true,
+                  saveToActiveFile: true,
+                  toggleTheme: true,
+                  saveAsImage: true
+                }
+              }}
             />
           </ErrorBoundary>
         </div>
