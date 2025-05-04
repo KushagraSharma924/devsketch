@@ -58,8 +58,7 @@ export default function Home() {
         }
       }
     );
-
-    // Clean up the subscription
+    // Clean up the cfsubscription
     return () => {
       authListener.subscription.unsubscribe();
     };
@@ -102,7 +101,7 @@ export default function Home() {
         updated_at?: string;
         session_id: string;
       }
-      
+  
       try {
         setChatsLoading(true);
         

@@ -361,14 +361,25 @@ export default function Canvas() {
       setGenerationError(null);
       setToast('Generating code...');
       
-      // Create a timeout to prevent infinite loading
+      // Create a timeout to prevent infinite loading - increased to 45 seconds
       const timeoutId = setTimeout(() => {
-        console.error('Code generation timed out after 30 seconds');
+        console.error('Code generation timed out after 45 seconds');
         setIsGenerating(false);
-        setGenerationError('Generation timed out. Please try again.');
-        setToast('Generation timed out. Please try again.');
-        setTimeout(() => setToast(null), 3000);
-      }, 30000);
+        setGenerationError('Generation timed out. Please try again with a simpler drawing or fewer elements.');
+        setToast('Generation timed out. Try a simpler drawing.');
+        setTimeout(() => setToast(null), 5000);
+      }, 45000);
+      
+      // Warn the user if the sketch is complex
+      if (sketchElements.length > 50) {
+        setToast('Your drawing is complex. Generation may take longer or timeout.');
+        // Keep this message a bit longer
+        setTimeout(() => {
+          if (isGenerating) {
+            setToast('Still working on generating your code...');
+          }
+        }, 5000);
+      }
       
       // Pre-process elements to add contextual information
       const processedElements = sketchElements.map((element: any) => {
@@ -451,12 +462,65 @@ export default function Canvas() {
       const requestBody = JSON.stringify(data);
       console.log('Request body (sample):', requestBody.substring(0, 200) + (requestBody.length > 200 ? '...' : ''));
       
-      // Make the API call with streaming response first
+      // First try the non-streaming approach for complex drawings
+      let useNonStreaming = sketchElements.length > 30;
+      
+      // If the sketch is complex, try non-streaming first
+      if (useNonStreaming) {
+        console.log('Sketch is complex, using non-streaming approach first');
+        try {
+          const nonStreamingData = { ...data, useNonStreaming: true };
+          const nonStreamingResponse = await fetch(`${host}/api/generate`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(nonStreamingData),
+          });
+          
+          // If we get a response, process it
+          if (nonStreamingResponse.ok) {
+            const jsonResult = await nonStreamingResponse.json();
+            
+            // Clear timeout since we got a response
+            clearTimeout(timeoutId);
+            
+            if (jsonResult.error) {
+              console.error('Non-streaming API returned error:', jsonResult.error);
+              throw new Error(jsonResult.error);
+            }
+            
+            console.log('Non-streaming API returned successfully');
+            
+            if (jsonResult.designToken) {
+              // Save the design token
+              setDesignId(jsonResult.designToken);
+              setStoreDesignId(jsonResult.designToken);
+            }
+            
+            if (jsonResult.code) {
+              setStoreCode(jsonResult.code);
+              setIsGenerating(false);
+              setToast('Code generated successfully!');
+              setTimeout(() => setToast(null), 3000);
+              return;
+            }
+          } else {
+            console.error('Non-streaming API failed with status:', nonStreamingResponse.status);
+            // Continue to streaming approach
+          }
+        } catch (nonStreamingError) {
+          console.error('Non-streaming approach failed:', nonStreamingError);
+          // Continue to streaming approach
+        }
+      }
+      
+      // Make the API call with streaming response as fallback or primary method
       console.log('Starting fetch request to', `${host}/api/generate`);
       let streamingFailed = false;
       
       try {
-        // Try the streaming approach first
+        // Try the streaming approach
         const response = await fetch(`${host}/api/generate`, {
           method: 'POST',
           headers: {
@@ -517,189 +581,99 @@ export default function Canvas() {
                     
                     if (data.message === 'error') {
                       console.error('Error message received:', data.error);
-                      setGenerationError(data.error || 'Unknown error');
-                      continue;
-                    }
-                    
-                    // Check for design token
-                    if (data.message === 'token' && data.designToken) {
+                      throw new Error(data.error || 'Unknown error in stream');
+                    } else if (data.message === 'token' && data.designToken) {
                       console.log('Design token received:', data.designToken);
                       designToken = data.designToken;
-                      
-                      // Save design token for later use - use multiple storage mechanisms for reliability
-                      localStorage.setItem('design_token', data.designToken);
-                      localStorage.setItem('devsketch-design-token', data.designToken);
-                      localStorage.setItem(DESIGN_TOKEN_KEY, data.designToken);
-                      localStorage.setItem(`design_token_backup_${Date.now()}`, data.designToken);
-                      
-                      // Update store design ID if we don't have one yet
-                      if (!designId) {
-                        setDesignId(data.designToken);
-                        setStoreDesignId(data.designToken);
-                      }
-                    }
-                    
-                    if (data.code) {
-                      console.log('Code chunk received, length:', data.code.length);
-                      
-                      // Add this chunk to our accumulated code
-                      const prevLength = code.length;
+                      setDesignId(data.designToken);
+                      setStoreDesignId(data.designToken);
+                    } else if (data.code) {
+                      // Append code chunk
                       code += data.code;
-                      console.log(`Added ${data.code.length} chars, code now ${prevLength} -> ${code.length} chars`);
+                      console.log(`Code chunk received, size: ${data.code.length}, total size: ${code.length}`);
                       
-                      // Update the store and save to localStorage with each chunk for redundancy
-                      setStoreCode(code);
-                      
-                      // Save the code to multiple locations to ensure it's available
-                      try {
-                        const tokenToUse = designToken || designId || genId;
-                        localStorage.setItem('last_generated_code', code);
-                        localStorage.setItem(`code_${tokenToUse}`, code);
-                        localStorage.setItem('devsketch-last-code', code);
-                        console.log(`Saved code chunk to localStorage with key code_${tokenToUse}`);
-                      } catch (storageError) {
-                        console.error('Failed to save code to localStorage:', storageError);
-                      }
-                      
+                      // If this is the last chunk, we're done
                       if (data.isLast) {
-                        console.log('Final code chunk received, total length:', code.length);
-                        console.log('Code preview:', code.substring(0, 200) + (code.length > 200 ? '...' : ''));
                         codeComplete = true;
-                        
-                        // Ensure the final code is saved to the store
+                        console.log('Final code chunk received, code is complete');
+                      }
+                      
+                      // Update the UI with partial code
+                      if (code.length > 0) {
                         setStoreCode(code);
-                        setToast('Code generated successfully');
+                        // Only set codeComplete when we have complete code
+                        if (codeComplete) {
+                          setIsGenerating(false);
+                          setToast('Code generated successfully!');
+                          setTimeout(() => setToast(null), 3000);
+                        } else {
+                          // Update the toast for partial code
+                          setToast(`Receiving code... (${Math.round((data.chunkIndex + 1) / data.totalChunks * 100)}%)`);
+                        }
+                      }
+                    } else if (data.message === 'success') {
+                      console.log('Success message received:', data.info);
+                      codeComplete = true;
+                      if (code.length > 0) {
+                        setIsGenerating(false);
+                        setToast('Code generated successfully!');
                         setTimeout(() => setToast(null), 3000);
-                        console.log('Store updated with complete code');
                       }
                     }
-                  } catch (parseError) {
-                    console.error('Error parsing JSON from stream:', parseError, 'on line:', line);
-                    
-                    // If we get consistent parsing errors, set flag to try non-streaming
-                    if (chunksReceived === 1) {
-                      streamingFailed = true;
-                      break;
-                    }
+                  } catch (jsonError) {
+                    console.error('Error parsing chunk JSON:', jsonError);
+                    console.error('Problematic chunk:', line);
                   }
                 }
-                
-                if (streamingFailed) {
-                  console.log('Stream response parsing failed, will try non-streaming fallback');
-                  break;
-                }
               }
               
-              console.log('Stream reading complete, code generated:', code ? 'Yes' : 'No');
-              
-              // If we have code or streaming worked properly, we're done
-              if (code || !streamingFailed) {
-                if (code) {
-                  // We got some code, save it to all storage mechanisms
-                  console.log('Final code received, total length:', code.length);
-                  console.log('Code sample:', code.substring(0, 100) + (code.length > 100 ? '...' : ''));
-                  
-                  setStoreCode(code);
-                  setToast('Code generated successfully');
-                  setTimeout(() => setToast(null), 3000);
-                } else if (codeComplete === false) {
-                  console.error('No code received from API');
-                  // Let error messages from the API drive the UI
-                  console.log('Keeping editor empty for this error case');
-                  setGenerationError('No code was generated. The API did not return any code.');
-                }
-                
-                setIsGenerating(false);
-                return; // Exit here if streaming worked
+              // Check if we received complete code
+              if (!codeComplete) {
+                console.warn('Stream ended but code is not marked as complete');
+                streamingFailed = true;
               }
-            } catch (streamError) {
-              console.error('Stream processing error:', streamError);
+            } catch (readerError) {
+              console.error('Stream reading error:', readerError);
               streamingFailed = true;
             }
           }
         }
         
-        // If we get here and streaming failed, use non-streaming fallback
         if (streamingFailed) {
-          console.log('Trying non-streaming fallback API request');
-          
-          // Modify data to request non-streaming response
-          const nonStreamingData = {
-            ...data,
-            useNonStreaming: true
-          };
-          
-          try {
-            const nonStreamingResponse = await fetch(`${host}/api/generate`, {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-                'Accept': 'application/json'
-              },
-              body: JSON.stringify(nonStreamingData),
-            });
-            
-            if (!nonStreamingResponse.ok) {
-              throw new Error(`Non-streaming API call failed with status: ${nonStreamingResponse.status}`);
-            }
-            
-            const result = await nonStreamingResponse.json();
-            console.log('Non-streaming response received:', result);
-            
-            if (result.error) {
-              setGenerationError(result.error || 'Unknown error in non-streaming response');
-            } else if (result.code) {
-              console.log('Received code via non-streaming API, length:', result.code.length);
-              setStoreCode(result.code);
-              
-              // Save design token if available
-              if (result.designToken) {
-                localStorage.setItem('design_token', result.designToken);
-                localStorage.setItem('devsketch-design-token', result.designToken);
-                localStorage.setItem(DESIGN_TOKEN_KEY, result.designToken);
-                
-                // Update store design ID if we don't have one yet
-                if (!designId) {
-                  setDesignId(result.designToken);
-                  setStoreDesignId(result.designToken);
-                }
-              }
-              
-              // Save the code to localStorage
-              try {
-                const tokenToUse = result.designToken || designId || genId;
-                localStorage.setItem('last_generated_code', result.code);
-                localStorage.setItem(`code_${tokenToUse}`, result.code);
-                localStorage.setItem('devsketch-last-code', result.code);
-              } catch (storageError) {
-                console.error('Failed to save code to localStorage:', storageError);
-              }
-              
-              setToast('Code generated successfully (non-streaming)');
-              setTimeout(() => setToast(null), 3000);
-            } else {
-              setGenerationError('No code was generated from the non-streaming API.');
-            }
-          } catch (nonStreamingError) {
-            console.error('Non-streaming API error:', nonStreamingError);
-            setGenerationError('Failed to generate code (non-streaming): ' + 
-              (nonStreamingError instanceof Error ? nonStreamingError.message : 'Unknown error'));
-          }
+          console.error('Streaming approach failed');
+          throw new Error('Failed to read streaming response');
         }
       } catch (error) {
-        console.error('Error in generation process:', error);
-        setGenerationError('Failed to generate code: ' + (error instanceof Error ? error.message : 'Unknown error'));
-        setToast('Failed to generate code');
-        setTimeout(() => setToast(null), 3000);
-      } finally {
+        console.error('API call failed:', error);
+        
+        // Provide a meaningful error message to the user
+        let errorMessage = '';
+        if (error instanceof Error && error.message) {
+          if (error.message.includes('timed out')) {
+            errorMessage = 'Generation timed out. Please try again with a simpler drawing or fewer elements.';
+          } else if (error.message.includes('504')) {
+            errorMessage = 'Server timeout error. The drawing may be too complex to generate code in the available time.';
+          } else {
+            errorMessage = `Generation Error: ${error.message}`;
+          }
+        } else {
+          errorMessage = 'Unknown generation error occurred';
+        }
+        
+        setGenerationError(errorMessage);
         setIsGenerating(false);
-        console.log('Code generation process complete');
+        setToast(errorMessage);
+        setTimeout(() => setToast(null), 5000);
       }
-    } catch (error) {
-      console.error('Error in generation process:', error);
-      setGenerationError('Failed to generate code: ' + (error instanceof Error ? error.message : 'Unknown error'));
-      setToast('Failed to generate code');
-      setTimeout(() => setToast(null), 3000);
+    } catch (topLevelError) {
+      console.error('Top-level error in code generation:', topLevelError);
+      const errorMsg = topLevelError instanceof Error ? 
+        `Error: ${topLevelError.message}` : 
+        'Unknown error occurred';
+      setGenerationError(errorMsg);
+      setIsGenerating(false);
+      setToast(errorMsg);
+      setTimeout(() => setToast(null), 5000);
     }
   };
 

@@ -8,6 +8,11 @@ const nextConfig = {
     // Have more pages loaded at once
     pagesBufferLength: 5,
   },
+  // Ensure environment variables are available
+  env: {
+    NEXT_PUBLIC_SUPABASE_URL: process.env.NEXT_PUBLIC_SUPABASE_URL,
+    NEXT_PUBLIC_SUPABASE_ANON_KEY: process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
+  },
 };
 
 module.exports = nextConfig; 

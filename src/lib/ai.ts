@@ -50,6 +50,39 @@ const generateDesignToken = (): string => {
   return uuid;
 };
 
+// Helper function to clean up code output from AI
+const cleanCodeOutput = (rawOutput: string): string => {
+  // Remove any markdown code block markers
+  let code = rawOutput.replace(/```(jsx?|tsx?|javascript|react)?/g, '').replace(/```/g, '');
+  
+  // Remove any leading/trailing explanations
+  if (code.includes('import ')) {
+    const firstImportIndex = code.indexOf('import ');
+    if (firstImportIndex > 0) {
+      code = code.substring(firstImportIndex);
+    }
+  }
+  
+  // Remove any explanation text after the last export
+  if (code.includes('export ')) {
+    const lastExportIndex = code.lastIndexOf('export ');
+    if (lastExportIndex >= 0) {
+      const lines = code.substring(lastExportIndex).split('\n');
+      for (let i = 0; i < lines.length; i++) {
+        if (lines[i].includes('export ') && lines[i].includes(';')) {
+          code = code.substring(0, lastExportIndex + lines.slice(0, i + 1).join('\n').length);
+          break;
+        }
+      }
+    }
+  }
+  
+  // Remove any remaining explanations or text outside of code
+  code = code.trim();
+  
+  return code;
+};
+
 /*
  * Convert Excalidraw sketch to code using OpenAI API only
  */
@@ -72,7 +105,6 @@ export async function sketchToCode({
   if (!sketchData || !Array.isArray(sketchData) || sketchData.length === 0) {
     console.error('Invalid or empty sketch data');
     
-    // Return empty code instead of a default component
     return {
       code: '',
       error: 'Error: Empty sketch data. Please add elements to your drawing before generating code.',
@@ -86,7 +118,6 @@ export async function sketchToCode({
   if (!hasTokens) {
     console.warn('Rate limit exceeded');
     
-    // Return empty code instead of a rate limit message component
     return {
       code: '',
       error: 'Rate limit exceeded. Please try again in a minute.',
@@ -94,10 +125,11 @@ export async function sketchToCode({
     };
   }
 
-  // Create a simpler JSON representation of the sketch
+  // Create a simpler, more compact JSON representation of the sketch
   // This prevents errors with circular references and reduces size
   const simplifiedSketch = sketchData.map((element: any) => {
-    // Extract more properties for better AI interpretation
+    // Extract only essential properties for better AI interpretation
+    // and to reduce payload size
     const { 
       id, 
       type, 
@@ -110,17 +142,10 @@ export async function sketchToCode({
       strokeColor, 
       backgroundColor, 
       fillStyle,
-      roughness,
-      opacity,
-      strokeWidth,
-      roundness,
-      isDeleted,
-      angle,
-      groupIds,
-      boundElements,
-      link
+      groupIds
     } = element;
     
+    // Return a minimal representation
     return { 
       id, 
       type, 
@@ -133,64 +158,50 @@ export async function sketchToCode({
       strokeColor, 
       backgroundColor, 
       fillStyle,
-      roughness: roughness || 0,
-      opacity: opacity || 100,
-      strokeWidth: strokeWidth || 1,
-      roundness: roundness || null,
-      isDeleted: isDeleted || false,
-      angle: angle || 0,
-      groupIds: groupIds || [],
-      boundElements: boundElements || [],
-      link: link || null
+      groupIds: groupIds || []
     };
   });
 
   // Add user reference if available
   const userContext = userId && userId.trim() ? `\nReference ID: ${userId.substring(0, 8)}` : '';
   
-  // Format the prompt with the provided data
+  // Format a smaller, more focused prompt
   const promptTemplate = `Convert this Excalidraw sketch to ${framework} + ${css} code:
+- Return ONLY pure code with no explanations or comments
 - Use functional components
-- Make responsive
-- Export all dependencies
-- Return ONLY code
-- DO NOT use offline templates, generate all code from scratch
-- Interpret all visual elements (rectangles, circles, lines, text) and convert them to appropriate UI components
-- Rectangle shapes should become div containers with borders
-- Text elements should be rendered as appropriate heading or paragraph elements
-- Consider relative positioning of elements when designing the layout${userContext}
-
-IMPORTANT: ALWAYS return working code that renders something, even if the sketch is unclear. If unsure about the intent, create a reasonable default component.
+- Make the layout responsive
+- Do NOT include commas between JSX attributes
+- Do NOT include any explanation text before or after the code
+- Give me ONLY the component code that I can directly copy and use
+- Start with import statements and end with export statement${userContext}
 
 Sketch JSON: ${JSON.stringify(simplifiedSketch)}`;
 
   console.log('Prompt created, sending to AI model...');
-
+  
+  // Try gpt-3.5-turbo first as it's faster
   try {
-    // Use GPT-4o Mini
-    console.log('Sending request to GPT-4o-mini...');
+    console.log('Sending request to GPT-3.5 Turbo first for faster response...');
     const response = await openai.chat.completions.create({
-      model: 'gpt-4o-mini',
+      model: 'gpt-3.5-turbo',
       messages: [
         {
           role: 'system',
-          content: `You are a specialized AI that converts Excalidraw sketches to code. 
-Your primary task is to analyze the JSON representation of visual elements and translate them into functional code.
+          content: `You are a specialized AI that converts Excalidraw sketches directly to clean code. 
+Your task is to analyze the JSON representation of visual elements and translate them into functional code.
+
+IMPORTANT OUTPUT RULES:
+- Return ONLY pure code with no markdown formatting, no comments, and no explanations
+- Do not wrap code in backticks or code blocks
+- Do not include any comments like "here's the code" or "this will create..."
+- Begin with import statements and end with export statement
+- Do not include any text before or after the code
 
 For Excalidraw elements:
 - Rectangle elements should be converted to div containers with appropriate borders, width, height, and positioning
 - Text elements should become headings, paragraphs, labels, or button text depending on context
 - Lines should be interpreted as dividers or connectors between components
-- Circles/ellipses often represent buttons, avatars, or decorative elements
-
-Consider:
-- The relative positioning (x, y coordinates) to determine layout structure
-- Size (width, height) for responsive dimensions
-- Colors (strokeColor, backgroundColor) for styling
-- Text content and fontSize for typography
-- Element grouping (groupIds) to identify related components
-
-Always generate code from scratch, do not use templates.`,
+- Circles/ellipses often represent buttons, avatars, or decorative elements`,
         },
         {
           role: 'user',
@@ -198,99 +209,107 @@ Always generate code from scratch, do not use templates.`,
         },
       ],
       temperature: 0.2,
-      max_tokens: 8000,
+      max_tokens: 4000, // Reduced token count
     }, {
-      timeout: 45000
+      timeout: 15000 // 15 second timeout for faster failure
     });
 
     // Log response info for debugging
-    console.log(`OpenAI response received, content length: ${response.choices[0]?.message?.content?.length || 0}`);
+    console.log(`GPT-3.5 Turbo response received, content length: ${response.choices[0]?.message?.content?.length || 0}`);
     
-    const generatedCode = response.choices[0]?.message?.content || '';
+    let generatedCode = response.choices[0]?.message?.content || '';
     
     if (!generatedCode || generatedCode.trim() === '') {
-      console.error('GPT-4o-mini returned empty content');
-      throw new Error('Empty response from GPT-4o-mini');
+      console.error('GPT-3.5-turbo returned empty content, will try fallback');
+      throw new Error('Empty response from GPT-3.5-turbo');
     }
+
+    // Clean up the code output
+    generatedCode = cleanCodeOutput(generatedCode);
 
     return {
       code: generatedCode,
       designToken
     };
   } catch (error) {
-    console.error('Error with GPT-4o Mini, falling back to GPT-3.5 Turbo:', error);
+    console.error('Error with GPT-3.5 Turbo, trying GPT-4o-mini:', error);
 
     try {
-      // Fallback to GPT-3.5 Turbo
-      console.log('Falling back to GPT-3.5 Turbo...');
+      // Try GPT-4o-mini with a shorter timeout
+      console.log('Trying GPT-4o-mini with reduced complexity...');
+      
+      // Create an even simpler representation for GPT-4o-mini
+      const verySimplifiedSketch = simplifiedSketch.map((element: any) => {
+        const { id, type, x, y, width, height, text } = element;
+        return { id, type, x, y, width, height, text };
+      });
+      
+      // Simpler prompt for GPT-4o-mini
+      const miniPromptTemplate = `Convert this sketch to ${framework} with ${css}:
+- Return ONLY code with no explanations
+- Do NOT use commas between JSX attributes
+- Only include import statements, component code, and export statement
+- No markdown formatting, no comments, just pure code
+Sketch: ${JSON.stringify(verySimplifiedSketch)}`;
+      
       const fallbackResponse = await openai.chat.completions.create({
-        model: 'gpt-3.5-turbo',
+        model: 'gpt-4o-mini',
         messages: [
           {
             role: 'system',
-            content: `You are a specialized AI that converts Excalidraw sketches to code. 
-Your primary task is to analyze the JSON representation of visual elements and translate them into functional code.
-
-For Excalidraw elements:
-- Rectangle elements should be converted to div containers with appropriate borders, width, height, and positioning
-- Text elements should become headings, paragraphs, labels, or button text depending on context
-- Lines should be interpreted as dividers or connectors between components
-- Circles/ellipses often represent buttons, avatars, or decorative elements
-
-Consider:
-- The relative positioning (x, y coordinates) to determine layout structure
-- Size (width, height) for responsive dimensions
-- Colors (strokeColor, backgroundColor) for styling
-- Text content and fontSize for typography
-- Element grouping (groupIds) to identify related components
-
-Always generate code from scratch, do not use templates.`,
+            content: 'You convert sketches directly to pure code. Return ONLY the code itself - no explanations, no markdown formatting, no code block markers, and no additional text. Start with imports and end with export statement.',
           },
           {
             role: 'user',
-            content: promptTemplate,
+            content: miniPromptTemplate,
           },
         ],
         temperature: 0.2,
-        max_tokens: 8000,
+        max_tokens: 2000, // Even smaller token count
       }, {
-        timeout: 45000
+        timeout: 15000 // 15 second timeout
       });
       
-      // Log fallback response info for debugging
-      console.log(`Fallback response received, content length: ${fallbackResponse.choices[0]?.message?.content?.length || 0}`);
+      console.log(`GPT-4o-mini response received, content length: ${fallbackResponse.choices[0]?.message?.content?.length || 0}`);
       
-      const generatedCode = fallbackResponse.choices[0]?.message?.content || '';
+      const fallbackCode = fallbackResponse.choices[0]?.message?.content || '';
       
-      if (!generatedCode || generatedCode.trim() === '') {
-        console.error('GPT-3.5-turbo returned empty content');
+      if (!fallbackCode || fallbackCode.trim() === '') {
         return {
-          code: '',
-          error: 'AI models failed to generate code from the sketch. The sketch may be too complex or not contain recognizable UI elements.',
-          debug: { 
-            error: 'Empty response from fallback model',
-            sketchLength: sketchData.length 
-          },
+          code: '', 
+          error: 'Failed to generate code. Please try again with a simpler sketch.',
           designToken
         };
       }
       
+      // Clean up the fallback code output
+      const cleanedFallbackCode = cleanCodeOutput(fallbackCode);
+      
       return {
-        code: generatedCode,
+        code: cleanedFallbackCode,
         designToken
       };
     } catch (fallbackError) {
-      console.error('Error with fallback model:', fallbackError);
+      console.error('All model attempts failed:', fallbackError);
       
-      // Return empty code instead of emergency fallback component
+      // Return a basic template as last resort
+      const basicTemplate = `// Basic ${framework} component with ${css}
+${framework === 'react' ? `
+import React from 'react';
+
+export default function GeneratedComponent() {
+  return (
+    <div className="container mx-auto p-4">
+      <h1 className="text-2xl font-bold mb-4">Generated Component</h1>
+      <p>The sketch could not be properly converted to code.</p>
+      <p>Please try again with a simpler sketch.</p>
+    </div>
+  );
+}` : `// Fallback code for ${framework}`}`;
+      
       return {
-        code: '',
-        error: 'Failed to generate code using both primary and fallback models.',
-        debug: { 
-          primaryError: error instanceof Error ? error.message : 'Unknown error', 
-          fallbackError: fallbackError instanceof Error ? fallbackError.message : 'Unknown error',
-          sketchLength: sketchData.length 
-        },
+        code: basicTemplate,
+        error: 'Failed to generate code after multiple attempts. Returning a basic template.',
         designToken
       };
     }
