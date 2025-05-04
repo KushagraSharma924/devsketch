@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState, useRef } from 'react';
 import Editor, { OnMount } from '@monaco-editor/react';
 import { createClient, updateDesignCode } from '@/lib/supabase/client';
 import { useSearchParams } from 'next/navigation';
+import { useEditorStore } from '@/lib/store/editor-store';
 
 // Supported frameworks
 export type Framework = 'react' | 'vue' | 'svelte';
@@ -30,7 +31,50 @@ const ALT_SESSION_KEYS = [
 ];
 
 // Function to get localStorage key for a specific design
-const getDesignLocalStorageKey = (designId: string) => `devsketch-code-${designId}`;
+const getDesignLocalStorageKey = (designId: string) => `code_${designId}`;
+
+// Keys for code storage to check in preference order
+const CODE_STORAGE_KEYS = [
+  'devsketch-last-code',
+  'last_generated_code'
+];
+
+// Simplified function to directly get code from localStorage
+const getCodeFromLocalStorage = (designId: string | null): string | null => {
+  if (!designId) return null;
+  
+  try {
+    // First try the design-specific key
+    const designKey = getDesignLocalStorageKey(designId);
+    const codeFromDesign = localStorage.getItem(designKey);
+    if (codeFromDesign) {
+      console.log(`Found code with design key: ${designKey}`);
+      return codeFromDesign;
+    }
+    
+    // Try final code key
+    const finalCodeKey = `final_code_${designId}`;
+    const finalCode = localStorage.getItem(finalCodeKey);
+    if (finalCode) {
+      console.log(`Found code with final code key: ${finalCodeKey}`);
+      return finalCode;
+    }
+
+    // Try general keys
+    for (const key of CODE_STORAGE_KEYS) {
+      const code = localStorage.getItem(key);
+      if (code) {
+        console.log(`Found code with general key: ${key}`);
+        return code;
+      }
+    }
+    
+    return null;
+  } catch (e) {
+    console.error('Error reading from localStorage:', e);
+    return null;
+  }
+};
 
 // Function to extract code from excalidraw_data if the code column doesn't exist
 const extractCodeFromExcalidrawData = (excalidrawData: any): string | null => {
@@ -56,6 +100,10 @@ export default function CodeEditor({ value, onChange, language }: CodeEditorProp
   const searchParams = useSearchParams();
   const urlDesignId = searchParams.get('id');
   
+  // Access the store to get the code generated from the Canvas
+  const storeCode = useEditorStore(state => state.code);
+  const setStoreCode = useEditorStore(state => state.setCode);
+  
   const [code, setCode] = useState<string>('');
   const [userId, setUserId] = useState<string | null>(null);
   const [designId, setDesignId] = useState<string | null>(urlDesignId);
@@ -67,6 +115,11 @@ export default function CodeEditor({ value, onChange, language }: CodeEditorProp
   const initialLoadComplete = useRef(false);
   const hasLoadedFromDatabase = useRef(false);
   const forceRefreshAttempted = useRef(false);
+  const hasCheckedStore = useRef(false);
+  const supabaseError = useRef<Error | null>(null);
+  const loadedDesignIdRef = useRef<string | null>(null);
+  // Add a timer ref to ensure loading doesn't get stuck
+  const loadingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   // Function to handle editor mounting
   const handleEditorDidMount: OnMount = (editor, monaco) => {
@@ -79,6 +132,10 @@ export default function CodeEditor({ value, onChange, language }: CodeEditorProp
     if (code) {
       console.log('Setting editor value directly on mount:', code.substring(0, 30) + '...');
       editor.setValue(code);
+    } else {
+      // Ensure editor is completely empty
+      editor.setValue("");
+      console.log('Setting editor to empty value');
     }
   };
 
@@ -116,14 +173,22 @@ export default function CodeEditor({ value, onChange, language }: CodeEditorProp
   };
 
   // Store the design token to track which design we're working with
-  const saveDesignToken = useCallback((designId: string) => {
-    if (!designId) return;
+  const saveDesignToken = useCallback((designToken: string) => {
+    if (!designToken) return;
     
     try {
-      localStorage.setItem(DESIGN_TOKEN_KEY, designId);
-      console.log(`Saved design token for: ${designId}`);
+      localStorage.setItem(DESIGN_TOKEN_KEY, designToken);
+      console.log(`Saved design token: ${designToken}`);
+      
+      // Create backup tokens in case the main one gets lost
+      localStorage.setItem(`${DESIGN_TOKEN_KEY}_backup`, designToken);
+      localStorage.setItem(`design_token_${Date.now()}`, designToken);
+      
+      // Return the token for confirmation
+      return designToken;
     } catch (err) {
       console.error('Failed to save design token:', err);
+      return null;
     }
   }, []);
 
@@ -293,8 +358,27 @@ export default function CodeEditor({ value, onChange, language }: CodeEditorProp
 
   // Fetch user ID and initial data on mount
   useEffect(() => {
+    // Skip if we've already loaded this design ID to prevent loops
+    if (loadedDesignIdRef.current === urlDesignId) {
+      console.log('Skipping load for already loaded design ID:', urlDesignId);
+      return;
+    }
+    
     let mounted = true;
-    setIsLoading(true);
+    console.log('Starting fresh load for design ID:', urlDesignId);
+    loadedDesignIdRef.current = urlDesignId;
+    
+    // Create a helper function to safely set loading state
+    const safeSetLoading = (loadingState: boolean) => {
+      if (mounted && (isLoading !== loadingState)) {
+        setIsLoading(loadingState);
+      }
+    };
+    
+    // Set initial loading state
+    safeSetLoading(true);
+    
+    // Use these refs to track loading state to avoid loops
     initialLoadComplete.current = false;
     hasLoadedFromDatabase.current = false;
     
@@ -305,6 +389,83 @@ export default function CodeEditor({ value, onChange, language }: CodeEditorProp
         // Reset error state on new attempt
         if (mounted) setError(null);
         
+        console.log('Starting code load for editor...');
+        
+        // Step 1: Try loading from store (fastest, in-memory)
+        if (storeCode) {
+          console.log('Using code from store:', storeCode.substring(0, 50) + '...');
+          setCode(storeCode);
+          onChange(storeCode);
+          
+          // If editor is already mounted, set value directly
+          if (editorRef.current) {
+            console.log('Setting editor value directly from store');
+            editorRef.current.setValue(storeCode);
+          }
+          
+          hasLoadedFromDatabase.current = true;
+          hasCheckedStore.current = true;
+          initialLoadComplete.current = true;
+          safeSetLoading(false);
+          return;
+        }
+        
+        // Step 2: Try all localStorage options
+        const currentDesignId = urlDesignId || getDesignToken();
+        if (currentDesignId) {
+          console.log('Looking for code with design ID:', currentDesignId);
+          const localCode = getCodeFromLocalStorage(currentDesignId);
+          
+          if (localCode) {
+            console.log('Using code from localStorage:', localCode.substring(0, 50) + '...');
+            setCode(localCode);
+            onChange(localCode);
+            
+            // Update the store so it's available for other components
+            setStoreCode(localCode);
+            
+            // If editor is already mounted, set value directly
+            if (editorRef.current) {
+              console.log('Setting editor value directly from localStorage');
+              editorRef.current.setValue(localCode);
+            }
+            
+            hasLoadedFromDatabase.current = true;
+            initialLoadComplete.current = true;
+            safeSetLoading(false);
+            return;
+          }
+        }
+        
+        // Step 3: If no design ID, check for any available code in localStorage
+        if (!currentDesignId) {
+          for (const key of CODE_STORAGE_KEYS) {
+            const genericCode = localStorage.getItem(key);
+            if (genericCode) {
+              console.log(`Using generic code from ${key}:`, genericCode.substring(0, 50) + '...');
+              setCode(genericCode);
+              onChange(genericCode);
+              
+              // Update the store
+              setStoreCode(genericCode);
+              
+              // If editor is already mounted, set value directly
+              if (editorRef.current) {
+                console.log('Setting editor value directly from generic localStorage key');
+                editorRef.current.setValue(genericCode);
+              }
+              
+              hasLoadedFromDatabase.current = true;
+              initialLoadComplete.current = true;
+              safeSetLoading(false);
+              return;
+            }
+          }
+        }
+        
+        console.log('No code found in store or localStorage, trying database...');
+        
+        // Step 4: Continue with database loading if previous attempts failed
         // Force a direct database load when we have a designId
         let directDesignId = urlDesignId;
         
@@ -364,7 +525,7 @@ export default function CodeEditor({ value, onChange, language }: CodeEditorProp
                 }
                 
                 hasLoadedFromDatabase.current = true;
-                setIsLoading(false);
+                safeSetLoading(false);
                 initialLoadComplete.current = true;
               } else if (directCodeData.excalidraw_data) {
                 // Try to extract code from excalidraw_data as fallback
@@ -401,7 +562,7 @@ export default function CodeEditor({ value, onChange, language }: CodeEditorProp
         
         if (!session) {
           console.warn('No active session found in CodeEditor component');
-          if (mounted) setIsLoading(false);
+          if (mounted) safeSetLoading(false);
           return;
         }
         
@@ -414,7 +575,7 @@ export default function CodeEditor({ value, onChange, language }: CodeEditorProp
         
         if (!user) {
           console.warn('No user found in CodeEditor component');
-          if (mounted) setIsLoading(false);
+          if (mounted) safeSetLoading(false);
           return;
         }
         
@@ -518,11 +679,25 @@ export default function CodeEditor({ value, onChange, language }: CodeEditorProp
                       
                       hasLoadedFromDatabase.current = true;
                     } else {
-                      console.log('No code found in excalidraw_data, using empty string');
-                      setCode('');
+                      console.log('No code found in excalidraw_data, checking store');
+                      // Check if we have code from the store before defaulting to empty string
+                      if (storeCode) {
+                        console.log('Using code from store as fallback:', storeCode.substring(0, 30) + '...');
+                        setCode(storeCode);
+                        onChange(storeCode);
+                        
+                        // If editor is already mounted, set value directly
+                        if (editorRef.current) {
+                          console.log('Setting editor value from store as fallback');
+                          editorRef.current.setValue(storeCode);
+                        }
+                      } else {
+                        console.log('No code found in design or store, using empty string');
+                        setCode('');  // Explicitly set empty code
+                      }
                     }
                     
-                    setIsLoading(false);
+                    safeSetLoading(false);
                     initialLoadComplete.current = true;
                     return;
                   }
@@ -530,7 +705,7 @@ export default function CodeEditor({ value, onChange, language }: CodeEditorProp
                 
                 console.log('Showing editor with empty code despite error');
                 if (mounted) {
-                  setIsLoading(false);
+                  safeSetLoading(false);
                   setError(designError instanceof Error ? designError : new Error('Failed to load code from database'));
                 }
                 initialLoadComplete.current = true;
@@ -571,12 +746,40 @@ export default function CodeEditor({ value, onChange, language }: CodeEditorProp
                     
                     hasLoadedFromDatabase.current = true;
                   } else {
-                    console.log('No code found in design, using empty string');
-                    setCode('');  // Explicitly set empty code
+                    console.log('No code found in excalidraw_data, checking store');
+                    // Check if we have code from the store before defaulting to empty string
+                    if (storeCode) {
+                      console.log('Using code from store as fallback:', storeCode.substring(0, 30) + '...');
+                      setCode(storeCode);
+                      onChange(storeCode);
+                      
+                      // If editor is already mounted, set value directly
+                      if (editorRef.current) {
+                        console.log('Setting editor value from store as fallback');
+                        editorRef.current.setValue(storeCode);
+                      }
+                    } else {
+                      console.log('No code found in design or store, using empty string');
+                      setCode('');  // Explicitly set empty code
+                    }
                   }
                 } else {
-                  console.log('No code found in design, using empty string');
-                  setCode('');  // Explicitly set empty code
+                  console.log('No design data, checking store');
+                  // Check if we have code from the store before defaulting to empty string
+                  if (storeCode) {
+                    console.log('Using code from store as fallback for missing design data:', storeCode.substring(0, 30) + '...');
+                    setCode(storeCode);
+                    onChange(storeCode);
+                    
+                    // If editor is already mounted, set value directly
+                    if (editorRef.current) {
+                      console.log('Setting editor value from store for missing design data');
+                      editorRef.current.setValue(storeCode);
+                    }
+                  } else {
+                    console.log('No code found in design or store, using empty string');
+                    setCode('');  // Explicitly set empty code
+                  }
                 }
               }
             } catch (dbError) {
@@ -591,19 +794,48 @@ export default function CodeEditor({ value, onChange, language }: CodeEditorProp
         console.error('Authentication or data loading error in CodeEditor component:', error instanceof Error ? error.message : JSON.stringify(error));
         if (mounted) {
           setError(error instanceof Error ? error : new Error('Authentication failed'));
+          safeSetLoading(false);
         }
       } finally {
         if (mounted) {
-          console.log('Setting isLoading to false');
-          setIsLoading(false);
+          console.log('Setting isLoading to false, has store code:', !!storeCode);
+          
+          // If we have code in the store but not from the database,
+          // make sure we use it before finalizing loading
+          if (storeCode && !hasLoadedFromDatabase.current) {
+            setCode(storeCode);
+            onChange(storeCode);
+            
+            // If editor is already mounted, set value directly
+            if (editorRef.current) {
+              console.log('Setting editor value from store in finally block');
+              editorRef.current.setValue(storeCode);
+            }
+            
+            hasLoadedFromDatabase.current = true;
+          }
+          
+          safeSetLoading(false);
           initialLoadComplete.current = true;
         }
       }
     };
 
     fetchData();
-    return () => { mounted = false; };
-  }, [urlDesignId, onChange, getDesignToken, saveDesignToken, getDesignIdFromExcalidrawSession]);
+    
+    // Cleanup function
+    return () => { 
+      mounted = false; 
+      
+      // If React StrictMode is causing a double-render,
+      // we need to reset the loadedDesignIdRef to null for the design
+      // we were just loading, so it will load properly on the second render
+      if (loadedDesignIdRef.current === urlDesignId) {
+        console.log('Resetting loadedDesignIdRef in cleanup');
+        loadedDesignIdRef.current = null;
+      }
+    };
+  }, [urlDesignId]); // Only depend on urlDesignId to prevent dependency cycles
 
   // Update editor value when code changes
   useEffect(() => {
@@ -703,13 +935,13 @@ export default function CodeEditor({ value, onChange, language }: CodeEditorProp
     verifyCodeColumn();
   }, [userId, designId]);
 
-  // Save function (debounced)
+  // Save function (previously used database, now just updates local state)
   const saveToSupabase = useCallback(async (codeValue: string) => {
     if (!userId || !designId || isSaving.current) return;
     
     isSaving.current = true;
     try {
-      console.log('Saving code to Supabase for design:', designId);
+      console.log('Updating local code state for design:', designId);
       
       // Save current design ID as token
       saveDesignToken(designId);
@@ -717,56 +949,45 @@ export default function CodeEditor({ value, onChange, language }: CodeEditorProp
       // Ensure code is a string
       const safeCodeValue = codeValue || '';
       
-      // Use the utility function that handles column missing errors
-      const { success, error } = await updateDesignCode(supabase, designId, safeCodeValue);
+      // Save code to all storage mechanisms for redundancy
+      // 1. Store state
+      setStoreCode(safeCodeValue);
       
-      if (!success) {
-        // Special error message for schema issues
-        if (error && error.message && 
-            (error.message.includes('column') || 
-             error.message.includes('does not exist') || 
-             error.message.includes('schema'))) {
-          console.warn('Database schema issue detected:', error.message);
-          // We can show a different message but still consider it partially successful
-          setToast('Code saved in alternative format');
-          setTimeout(() => setToast(null), 3000);
-          
-          // Update local state anyway
-          setCode(safeCodeValue);
-          onChange(safeCodeValue);
-          
-          // Show a less severe error
-          setError(new Error('Database schema warning: ' + error.message));
-          return;
-        }
-        
-        console.error('Error saving code to Supabase:', error);
-        throw error;
-      }
-      
-      // Clear error on successful save
-      setError(null);
-      
-      setToast('Code saved');
-      setTimeout(() => setToast(null), 3000);
-      
-      // Call the onChange prop for parent components
+      // 2. Local component state
+      setCode(safeCodeValue);
       onChange(safeCodeValue);
       
+      // 3. localStorage with all possible keys
+      try {
+        localStorage.setItem(`code_${designId}`, safeCodeValue);
+        localStorage.setItem('last_generated_code', safeCodeValue);
+        localStorage.setItem('devsketch-last-code', safeCodeValue);
+        localStorage.setItem(`final_code_${designId}`, safeCodeValue);
+        console.log('Code saved to all localStorage keys');
+      } catch (storageError) {
+        console.error('Failed to save to localStorage:', storageError);
+      }
+      
+      // Clear error on successful update
+      if (supabaseError.current) supabaseError.current = null;
+      
+      setToast('Code updated locally');
+      setTimeout(() => setToast(null), 3000);
+      
     } catch (error) {
-      console.error('Save error:', error);
+      console.error('Local state update error:', error);
       
       // More informative error message
       const errorMessage = error instanceof Error 
-        ? `Failed to save code: ${error.message}` 
-        : 'Failed to save code to database';
+        ? `Failed to update code: ${error.message}` 
+        : 'Failed to update code locally';
         
       setError(new Error(errorMessage));
       
-      // Still update local state even if save fails
+      // Still update local state even if there's an error
       setCode(codeValue);
       
-      // Try to notify parent of change even if save fails
+      // Try to notify parent of change even if update fails
       try {
         onChange(codeValue);
       } catch (e) {
@@ -775,7 +996,7 @@ export default function CodeEditor({ value, onChange, language }: CodeEditorProp
     } finally {
       isSaving.current = false;
     }
-  }, [userId, designId, onChange, saveDesignToken]);
+  }, [userId, designId, onChange, saveDesignToken, supabaseError, setStoreCode]);
 
   // Auto-save on changes (debounced)
   useEffect(() => {
@@ -791,11 +1012,26 @@ export default function CodeEditor({ value, onChange, language }: CodeEditorProp
   }, [code, saveToSupabase, userId, designId]);
 
   // Handle changes from the Monaco editor
-  const handleEditorChange = (value: string | undefined) => {
+  const handleEditorChange = useCallback((value: string | undefined) => {
     if (value !== undefined) {
       setCode(value);
+      
+      // Also update the parent via onChange
+      if (onChange) {
+        onChange(value);
+      }
+      
+      // Save to localStorage for backup
+      try {
+        if (designId) {
+          localStorage.setItem(`code_${designId}`, value);
+        }
+        localStorage.setItem('last_generated_code', value);
+      } catch (e) {
+        console.warn('Failed to save editor change to localStorage:', e);
+      }
     }
-  };
+  }, [designId, onChange]);
 
   // Get the language mode for Monaco based on the framework
   const getLanguageMode = (framework: Framework): string => {
@@ -975,6 +1211,99 @@ export default function CodeEditor({ value, onChange, language }: CodeEditorProp
     }
   }, [forceReloadCode, saveDesignToken]);
 
+  // Make sure to check the Zustand store for code
+  useEffect(() => {
+    if (storeCode && !hasCheckedStore.current) {
+      console.log('Using code from store:', storeCode.substring(0, 30) + '...');
+      setCode(storeCode);
+      onChange(storeCode);
+      
+      // If editor is already mounted, set value directly
+      if (editorRef.current) {
+        console.log('Setting editor value from store directly');
+        editorRef.current.setValue(storeCode);
+      }
+      
+      hasCheckedStore.current = true;
+      if (isLoading) {
+        setIsLoading(false);
+      }
+    }
+  }, [storeCode, isLoading, onChange]);
+
+  // Update when store code changes
+  useEffect(() => {
+    if (storeCode && storeCode !== code) {
+      console.log('Updating code from store change:', storeCode.substring(0, 30) + '...');
+      setCode(storeCode);
+      onChange(storeCode);
+      
+      // If editor is already mounted, set value directly
+      if (editorRef.current) {
+        console.log('Setting editor value from store update');
+        editorRef.current.setValue(storeCode);
+      }
+    }
+  }, [storeCode, code, onChange]);
+
+  // Show an info message if code is empty after loading
+  useEffect(() => {
+    if (!isLoading && initialLoadComplete.current && code === '' && !hasLoadedFromDatabase.current) {
+      console.log('Code is empty after loading completed');
+      setToast('No code found for this sketch. Click "Generate Code" in the canvas view to get started.');
+      setTimeout(() => setToast(null), 5000); // Show for 5 seconds
+    }
+  }, [isLoading, code]);
+
+  // Add a safety timeout to prevent loading state from getting stuck
+  useEffect(() => {
+    // If we're loading, set a timeout to force loading to complete
+    if (isLoading) {
+      loadingTimeoutRef.current = setTimeout(() => {
+        console.log('Loading timeout reached, forcing loading state to complete');
+        setIsLoading(false);
+        
+        // If we don't have code by this point, set empty code
+        if (!code && !storeCode) {
+          console.log('No code available after timeout, showing empty editor');
+          setCode('');
+          
+          // Show a helpful toast
+          setToast('Click "Generate Code" in the canvas to create code from your drawing.');
+          setTimeout(() => setToast(null), 5000);
+        }
+        
+        initialLoadComplete.current = true;
+      }, 3000); // 3 seconds timeout - reduced from 8 seconds
+    } else if (loadingTimeoutRef.current) {
+      // Clear the timeout if loading completes normally
+      clearTimeout(loadingTimeoutRef.current);
+      loadingTimeoutRef.current = null;
+    }
+    
+    // Clean up the timeout on unmount
+    return () => {
+      if (loadingTimeoutRef.current) {
+        clearTimeout(loadingTimeoutRef.current);
+        loadingTimeoutRef.current = null;
+      }
+    };
+  }, [isLoading, code, storeCode]);
+
+  // Fast initialize - immediately show empty editor if no code is available
+  useEffect(() => {
+    if (isLoading && !code && !storeCode && !hasLoadedFromDatabase.current) {
+      // If we're just starting and have no code, show empty editor fast
+      const quickInit = setTimeout(() => {
+        console.log('Quick initialization: showing empty editor');
+        setIsLoading(false);
+        initialLoadComplete.current = true;
+      }, 1000); // Show empty editor after 1 second
+      
+      return () => clearTimeout(quickInit);
+    }
+  }, [isLoading, code, storeCode, hasLoadedFromDatabase]);
+
   return (
     <div className="w-full h-full bg-white relative">
       {/* Display toast messages */}
@@ -1027,11 +1356,19 @@ export default function CodeEditor({ value, onChange, language }: CodeEditorProp
       
       {/* Always render the editor - now with a wrapping div with explicit dimensions */}
       <div style={{ width: '100%', height: '100%', position: 'absolute', top: 0, left: 0 }}>
+        {/* Show a subtle hint when editor is empty */}
+        {(!code || code === '') && !isLoading && (
+          <div className="absolute top-4 left-4 bg-blue-100 border border-blue-400 text-blue-700 px-4 py-3 rounded z-50 opacity-80 pointer-events-none">
+            <p>Draw on the canvas and click "Generate Code" to create code.</p>
+          </div>
+        )}
+        
         <Editor
           height="100%"
           width="100%"
           defaultLanguage={getLanguageMode(language)}
-          value={code || "// Start coding here..."}
+          defaultValue=""
+          value={code || ""}
           path={`file.${getFileExtension(language)}`}
           onChange={handleEditorChange}
           onMount={handleEditorDidMount}
@@ -1041,6 +1378,9 @@ export default function CodeEditor({ value, onChange, language }: CodeEditorProp
             scrollBeyondLastLine: false,
             fontSize: 14,
             automaticLayout: true,
+            lineNumbers: 'on',
+            wordWrap: 'on',
+            folding: true,
           }}
         />
       </div>

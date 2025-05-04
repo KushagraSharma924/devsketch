@@ -91,7 +91,6 @@ export default function Home() {
     
     fetchUserDesigns();
   }, [user]);
-
   // Fetch user chats when user is authenticated
   useEffect(() => {
     const fetchUserChats = async () => {

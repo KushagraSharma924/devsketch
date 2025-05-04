@@ -26,7 +26,6 @@ function generateUUID(): string {
       uuid += hexDigits.charAt(Math.floor(Math.random() * 16));
     }
   }
-  
   return uuid;
 }
 
@@ -74,7 +73,6 @@ function DrawPageContent() {
       
       setLeftPanelWidth(newLeftWidth);
     };
-
     const handleMouseUp = () => {
       setIsResizing(false);
     };
@@ -83,7 +81,6 @@ function DrawPageContent() {
       window.addEventListener('mousemove', handleMouseMove);
       window.addEventListener('mouseup', handleMouseUp);
     }
-
     return () => {
       window.removeEventListener('mousemove', handleMouseMove);
       window.removeEventListener('mouseup', handleMouseUp);

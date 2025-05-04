@@ -6,6 +6,15 @@ import dynamic from 'next/dynamic';
 import { createClient } from '@/lib/supabase/client';
 import { PostgrestError } from '@supabase/supabase-js';
 import { useSearchParams, useRouter } from 'next/navigation';
+import { useEditorStore } from '@/lib/store/editor-store';
+import { updateDesignCode } from '@/lib/supabase/client';
+import { toast } from 'sonner';
+import { exportToSvg } from '@excalidraw/excalidraw';
+
+// Constants for localStorage keys
+const DESIGN_TOKEN_KEY = 'devsketch-design-token';
+const LAST_CODE_KEY = 'devsketch-last-code';
+const EXCALIDRAW_SESSION_KEY = 'excalidraw-session-id';
 
 // Proper UUID generator that matches PostgreSQL's UUID format
 function generateUUID(): string {
@@ -37,6 +46,22 @@ const Excalidraw = dynamic(
 
 const supabase = createClient();
 
+// Helper function to get current user ID from Supabase
+const getCurrentUserId = async (): Promise<string | null> => {
+  try {
+    // Check if there's an active session
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session) return null;
+    
+    // Get the user from the session
+    const { data: { user } } = await supabase.auth.getUser();
+    return user?.id || null;
+  } catch (error) {
+    console.error('Error getting current user ID:', error);
+    return null;
+  }
+};
+
 export default function Canvas() {
   const searchParams = useSearchParams();
   const urlDesignId = searchParams.get('id');
@@ -49,6 +74,18 @@ export default function Canvas() {
   const excalidrawRef = useRef<any | null>(null);
   const isSaving = useRef(false); // Track ongoing saves to avoid race conditions
   const [isLoading, setIsLoading] = useState(true);
+  
+  // Generate Code state
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [generationError, setGenerationError] = useState<string | null>(null);
+  
+  // Access Zustand store
+  const setStoreElements = useEditorStore(state => state.setElements);
+  const setStoreCode = useEditorStore(state => state.setCode);
+  const storeDesignId = useEditorStore(state => state.designId);
+  const setStoreDesignId = useEditorStore(state => state.setDesignId);
+  const storeUserId = useEditorStore(state => state.userId);
+  const setStoreUserId = useEditorStore(state => state.setUserId);
   
   // Error handling states
   const [supabaseError, setSupabaseError] = useState<PostgrestError | Error | null>(null);
@@ -157,6 +194,7 @@ export default function Canvas() {
         if (user && mounted) {
           console.log('User authenticated in Canvas component:', user.id);
           setUserId(user.id);
+          setStoreUserId(user.id);
 
           // Create a new session ID for this drawing session
           const newSessionId = sessionId || generateUUID();
@@ -180,7 +218,9 @@ export default function Canvas() {
               if (specificDesign?.excalidraw_data && mounted) {
                 console.log('Loaded specific design:', specificDesign.id);
                 setElements(specificDesign.excalidraw_data);
+                setStoreElements(specificDesign.excalidraw_data);
                 setDesignId(specificDesign.id);
+                setStoreDesignId(specificDesign.id);
                 // If we have a session_id from the design, use it
                 if (specificDesign.session_id) {
                   setSessionId(specificDesign.session_id);
@@ -217,7 +257,9 @@ export default function Canvas() {
             if (designData?.excalidraw_data && mounted) {
               console.log('Loaded existing design:', designData.id);
               setElements(designData.excalidraw_data);
+              setStoreElements(designData.excalidraw_data);
               setDesignId(designData.id);
+              setStoreDesignId(designData.id);
               // If we have a session_id from the design, use it
               if (designData.session_id) {
                 setSessionId(designData.session_id);
@@ -245,6 +287,7 @@ export default function Canvas() {
               if (newDesign && mounted) {
                 console.log('New design created with ID:', newDesign.id);
                 setDesignId(newDesign.id);
+                setStoreDesignId(newDesign.id);
                 
                 // Update URL with the new design ID 
                 if (!urlDesignId) {
@@ -272,12 +315,399 @@ export default function Canvas() {
 
     fetchData();
     return () => { mounted = false; };
-  }, [urlDesignId, createLocalDesign, sessionId]);
+  }, [urlDesignId, createLocalDesign, sessionId, setStoreElements, setStoreDesignId, setStoreUserId]);
+
+  // Update Zustand store whenever elements change
+  useEffect(() => {
+    if (elements.length > 0) {
+      setStoreElements(elements as any[]);
+    }
+  }, [elements, setStoreElements]);
+
+  // Function to generate code from the sketch
+  const generateCode = async () => {
+    if (isGenerating) {
+      console.log('Already generating code, ignoring duplicate request');
+      return;
+    }
+    
+    // Get the current elements from the excalidraw instance
+    const currentElements = excalidrawRef.current?.getSceneElements();
+    
+    if (!currentElements) {
+      console.error('Could not get elements from excalidraw instance');
+      setToast('Error: Could not access drawing elements');
+      setTimeout(() => setToast(null), 3000);
+      return;
+    }
+    
+    // Use the elements from the excalidraw instance if available, otherwise fall back to state
+    const sketchElements = currentElements.length > 0 
+      ? currentElements 
+      : elements;
+    
+    console.log(`Using ${sketchElements.length} elements for generation`);
+    console.log('Elements sample:', JSON.stringify(sketchElements.slice(0, 1)));
+    
+    if (!sketchElements || sketchElements.length === 0) {
+      console.error('No elements to generate code from');
+      setToast('No elements to generate code from. Draw something first!');
+      setTimeout(() => setToast(null), 3000);
+      return;
+    }
+    
+    try {
+      setIsGenerating(true);
+      setGenerationError(null);
+      setToast('Generating code...');
+      
+      // Create a timeout to prevent infinite loading
+      const timeoutId = setTimeout(() => {
+        console.error('Code generation timed out after 30 seconds');
+        setIsGenerating(false);
+        setGenerationError('Generation timed out. Please try again.');
+        setToast('Generation timed out. Please try again.');
+        setTimeout(() => setToast(null), 3000);
+      }, 30000);
+      
+      // Pre-process elements to add contextual information
+      const processedElements = sketchElements.map((element: any) => {
+        // Make a copy to avoid mutating the original
+        const processed = { ...element };
+        
+        // Add element-type specific context
+        if (element.type === 'rectangle') {
+          processed.uiHint = 'container';
+          
+          // Check if it's likely a button based on size
+          if (element.width < 200 && element.height < 100) {
+            processed.uiHint = 'button';
+          }
+          
+          // Check if it might be a card
+          if (element.width > 200 && element.height > 200) {
+            processed.uiHint = 'card';
+          }
+          
+          // Check if it's likely an input field
+          if (element.width > 150 && element.height < 60) {
+            processed.uiHint = 'input';
+          }
+        }
+        
+        // Add contextual hints for text elements
+        if (element.type === 'text') {
+          // Guess the role of the text based on context
+          if (element.fontSize && element.fontSize > 20) {
+            processed.uiHint = 'heading';
+          } else if (element.text && element.text.length < 20) {
+            processed.uiHint = 'label';
+          } else {
+            processed.uiHint = 'paragraph';
+          }
+        }
+        
+        // Add hints for ellipse/circle elements
+        if (element.type === 'ellipse') {
+          processed.uiHint = 'button';
+          // If it's small, it might be an avatar or icon
+          if (element.width < 50 && element.height < 50) {
+            processed.uiHint = 'icon';
+          }
+        }
+        
+        // Add hints for line elements
+        if (element.type === 'line') {
+          processed.uiHint = 'divider';
+        }
+        
+        return processed;
+      });
+      
+      // Create a simple unique ID for this code generation
+      const genId = `gen_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+      
+      // Make sure we have a valid user ID
+      // First check component state, then store, then session
+      const currentUserId = userId || storeUserId || await getCurrentUserId();
+      console.log('Using user ID for code generation:', currentUserId || 'unavailable');
+      
+      const data = {
+        sketch_data: processedElements,
+        framework: 'react',
+        css: 'tailwind',
+        user_id: currentUserId || '',  // Send empty string instead of 'anonymous'
+        designId: designId || genId
+      };
+      
+      console.log('Sending data to API with ID:', designId || genId);
+      console.log(`Sending ${processedElements.length} processed elements`);
+      
+      // Get the origin for constructing absolute URL
+      const host = window.location.origin;
+      console.log('Using host:', host);
+      
+      // Prepare the request
+      const requestBody = JSON.stringify(data);
+      console.log('Request body (sample):', requestBody.substring(0, 200) + (requestBody.length > 200 ? '...' : ''));
+      
+      // Make the API call with streaming response first
+      console.log('Starting fetch request to', `${host}/api/generate`);
+      let streamingFailed = false;
+      
+      try {
+        // Try the streaming approach first
+        const response = await fetch(`${host}/api/generate`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Accept': 'text/event-stream'
+          },
+          body: requestBody,
+        });
+        
+        // Clear the timeout as the request completed
+        clearTimeout(timeoutId);
+        
+        console.log('API response status:', response.status, response.statusText);
+        console.log('Response headers:', Object.fromEntries([...response.headers.entries()]));
+        
+        if (!response.ok) {
+          const errorText = await response.text();
+          console.error(`API responded with status: ${response.status}`, errorText);
+          throw new Error(`API responded with status: ${response.status}. ${errorText}`);
+        }
+        
+        if (!response.body) {
+          console.error('API response has no body');
+          streamingFailed = true;
+        } else {
+          // Track all received code and completion status
+          let code = '';
+          let codeComplete = false;
+          let designToken = null;
+          let chunksReceived = 0;
+          
+          const reader = response.body.getReader();
+          if (!reader) {
+            console.error('Failed to get response reader');
+            streamingFailed = true;
+          } else {
+            try {
+              while (true) {
+                const { done, value } = await reader.read();
+                if (done) {
+                  console.log('Stream finished, code complete, received', chunksReceived, 'chunks');
+                  break;
+                }
+                
+                chunksReceived++;
+                const chunk = new TextDecoder().decode(value);
+                console.log(`Raw chunk ${chunksReceived} received (length ${chunk.length})`, chunk.substring(0, 100) + (chunk.length > 100 ? '...' : ''));
+                
+                // Handle multiple JSON objects in a single chunk (if they're line-separated)
+                const lines = chunk.split('\n').filter(line => line.trim());
+                console.log(`Chunk contains ${lines.length} lines`);
+                
+                for (const line of lines) {
+                  try {
+                    // Try to parse the line as JSON
+                    const data = JSON.parse(line);
+                    console.log('Parsed chunk data type:', data.message || (data.code ? 'code' : 'unknown'), 'length:', line.length);
+                    
+                    if (data.message === 'error') {
+                      console.error('Error message received:', data.error);
+                      setGenerationError(data.error || 'Unknown error');
+                      continue;
+                    }
+                    
+                    // Check for design token
+                    if (data.message === 'token' && data.designToken) {
+                      console.log('Design token received:', data.designToken);
+                      designToken = data.designToken;
+                      
+                      // Save design token for later use - use multiple storage mechanisms for reliability
+                      localStorage.setItem('design_token', data.designToken);
+                      localStorage.setItem('devsketch-design-token', data.designToken);
+                      localStorage.setItem(DESIGN_TOKEN_KEY, data.designToken);
+                      localStorage.setItem(`design_token_backup_${Date.now()}`, data.designToken);
+                      
+                      // Update store design ID if we don't have one yet
+                      if (!designId) {
+                        setDesignId(data.designToken);
+                        setStoreDesignId(data.designToken);
+                      }
+                    }
+                    
+                    if (data.code) {
+                      console.log('Code chunk received, length:', data.code.length);
+                      
+                      // Add this chunk to our accumulated code
+                      const prevLength = code.length;
+                      code += data.code;
+                      console.log(`Added ${data.code.length} chars, code now ${prevLength} -> ${code.length} chars`);
+                      
+                      // Update the store and save to localStorage with each chunk for redundancy
+                      setStoreCode(code);
+                      
+                      // Save the code to multiple locations to ensure it's available
+                      try {
+                        const tokenToUse = designToken || designId || genId;
+                        localStorage.setItem('last_generated_code', code);
+                        localStorage.setItem(`code_${tokenToUse}`, code);
+                        localStorage.setItem('devsketch-last-code', code);
+                        console.log(`Saved code chunk to localStorage with key code_${tokenToUse}`);
+                      } catch (storageError) {
+                        console.error('Failed to save code to localStorage:', storageError);
+                      }
+                      
+                      if (data.isLast) {
+                        console.log('Final code chunk received, total length:', code.length);
+                        console.log('Code preview:', code.substring(0, 200) + (code.length > 200 ? '...' : ''));
+                        codeComplete = true;
+                        
+                        // Ensure the final code is saved to the store
+                        setStoreCode(code);
+                        setToast('Code generated successfully');
+                        setTimeout(() => setToast(null), 3000);
+                        console.log('Store updated with complete code');
+                      }
+                    }
+                  } catch (parseError) {
+                    console.error('Error parsing JSON from stream:', parseError, 'on line:', line);
+                    
+                    // If we get consistent parsing errors, set flag to try non-streaming
+                    if (chunksReceived === 1) {
+                      streamingFailed = true;
+                      break;
+                    }
+                  }
+                }
+                
+                if (streamingFailed) {
+                  console.log('Stream response parsing failed, will try non-streaming fallback');
+                  break;
+                }
+              }
+              
+              console.log('Stream reading complete, code generated:', code ? 'Yes' : 'No');
+              
+              // If we have code or streaming worked properly, we're done
+              if (code || !streamingFailed) {
+                if (code) {
+                  // We got some code, save it to all storage mechanisms
+                  console.log('Final code received, total length:', code.length);
+                  console.log('Code sample:', code.substring(0, 100) + (code.length > 100 ? '...' : ''));
+                  
+                  setStoreCode(code);
+                  setToast('Code generated successfully');
+                  setTimeout(() => setToast(null), 3000);
+                } else if (codeComplete === false) {
+                  console.error('No code received from API');
+                  // Let error messages from the API drive the UI
+                  console.log('Keeping editor empty for this error case');
+                  setGenerationError('No code was generated. The API did not return any code.');
+                }
+                
+                setIsGenerating(false);
+                return; // Exit here if streaming worked
+              }
+            } catch (streamError) {
+              console.error('Stream processing error:', streamError);
+              streamingFailed = true;
+            }
+          }
+        }
+        
+        // If we get here and streaming failed, use non-streaming fallback
+        if (streamingFailed) {
+          console.log('Trying non-streaming fallback API request');
+          
+          // Modify data to request non-streaming response
+          const nonStreamingData = {
+            ...data,
+            useNonStreaming: true
+          };
+          
+          try {
+            const nonStreamingResponse = await fetch(`${host}/api/generate`, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'Accept': 'application/json'
+              },
+              body: JSON.stringify(nonStreamingData),
+            });
+            
+            if (!nonStreamingResponse.ok) {
+              throw new Error(`Non-streaming API call failed with status: ${nonStreamingResponse.status}`);
+            }
+            
+            const result = await nonStreamingResponse.json();
+            console.log('Non-streaming response received:', result);
+            
+            if (result.error) {
+              setGenerationError(result.error || 'Unknown error in non-streaming response');
+            } else if (result.code) {
+              console.log('Received code via non-streaming API, length:', result.code.length);
+              setStoreCode(result.code);
+              
+              // Save design token if available
+              if (result.designToken) {
+                localStorage.setItem('design_token', result.designToken);
+                localStorage.setItem('devsketch-design-token', result.designToken);
+                localStorage.setItem(DESIGN_TOKEN_KEY, result.designToken);
+                
+                // Update store design ID if we don't have one yet
+                if (!designId) {
+                  setDesignId(result.designToken);
+                  setStoreDesignId(result.designToken);
+                }
+              }
+              
+              // Save the code to localStorage
+              try {
+                const tokenToUse = result.designToken || designId || genId;
+                localStorage.setItem('last_generated_code', result.code);
+                localStorage.setItem(`code_${tokenToUse}`, result.code);
+                localStorage.setItem('devsketch-last-code', result.code);
+              } catch (storageError) {
+                console.error('Failed to save code to localStorage:', storageError);
+              }
+              
+              setToast('Code generated successfully (non-streaming)');
+              setTimeout(() => setToast(null), 3000);
+            } else {
+              setGenerationError('No code was generated from the non-streaming API.');
+            }
+          } catch (nonStreamingError) {
+            console.error('Non-streaming API error:', nonStreamingError);
+            setGenerationError('Failed to generate code (non-streaming): ' + 
+              (nonStreamingError instanceof Error ? nonStreamingError.message : 'Unknown error'));
+          }
+        }
+      } catch (error) {
+        console.error('Error in generation process:', error);
+        setGenerationError('Failed to generate code: ' + (error instanceof Error ? error.message : 'Unknown error'));
+        setToast('Failed to generate code');
+        setTimeout(() => setToast(null), 3000);
+      } finally {
+        setIsGenerating(false);
+        console.log('Code generation process complete');
+      }
+    } catch (error) {
+      console.error('Error in generation process:', error);
+      setGenerationError('Failed to generate code: ' + (error instanceof Error ? error.message : 'Unknown error'));
+      setToast('Failed to generate code');
+      setTimeout(() => setToast(null), 3000);
+    }
+  };
 
   // Watch for URL changes - this is important when DrawPage creates a new design
   useEffect(() => {
     if (urlDesignId && urlDesignId !== designId) {
       setDesignId(urlDesignId);
+      setStoreDesignId(urlDesignId);
       setIsLoading(true);
       
       const loadDesignFromUrl = async () => {
@@ -296,6 +726,7 @@ export default function Canvas() {
           
           if (design?.excalidraw_data) {
             setElements(design.excalidraw_data);
+            setStoreElements(design.excalidraw_data);
             if (design.session_id) {
               setSessionId(design.session_id);
             }
@@ -309,7 +740,7 @@ export default function Canvas() {
       
       loadDesignFromUrl();
     }
-  }, [urlDesignId, designId]);
+  }, [urlDesignId, designId, setStoreElements, setStoreDesignId]);
 
   // Realtime updates (remote changes)
   useEffect(() => {
@@ -328,6 +759,7 @@ export default function Canvas() {
         }, (payload) => {
           if (!isSaving.current) { // Only update if not from local save
             setElements(payload.new.excalidraw_data);
+            setStoreElements(payload.new.excalidraw_data);
           }
         })
         .subscribe((status) => {
@@ -344,9 +776,9 @@ export default function Canvas() {
     return () => {
       if (channel) channel.unsubscribe();
     };
-  }, [userId, designId]);
+  }, [userId, designId, setStoreElements]);
 
-  // Save function (debounced)
+  // Save function (removes database functionality)
   const saveToSupabase = useCallback(async (els: readonly any[]) => {
     if (!userId || !designId || isSaving.current) return;
     
@@ -358,20 +790,16 @@ export default function Canvas() {
 
     isSaving.current = true;
     try {
-      const { error } = await supabase
-        .from('designs')
-        .update({
-          excalidraw_data: els,
-          created_at: new Date().toISOString()
-        })
-        .eq('id', designId);
+      // No longer save to database, just update local state
+      console.log('Saving drawing to local storage instead of database');
       
-      if (error) throw error;
+      // Save to localStorage as fallback
+      saveToLocalStorage(els);
       
-      // Clear supabase error on successful save
+      // Clear supabase error since we're not using the database
       if (supabaseError) setSupabaseError(null);
       
-      setToast('Drawing saved');
+      setToast('Drawing saved locally');
       setTimeout(() => setToast(null), 3000);
       
     } catch (error) {
@@ -379,12 +807,12 @@ export default function Canvas() {
       setSupabaseError(error as Error);
       
       // Fallback to local storage
-      setToast('Connection lost - saving locally');
+      setToast('Saving locally only');
       saveToLocalStorage(els);
     } finally {
       isSaving.current = false;
     }
-  }, [userId, designId, supabaseError, saveToLocalStorage]);
+  }, [userId, designId, saveToLocalStorage, supabaseError, setSupabaseError, setToast]);
 
   // Auto-save on changes (debounced)
   useEffect(() => {
@@ -410,7 +838,9 @@ export default function Canvas() {
       const newSessionId = generateUUID();
       setSessionId(newSessionId);
       setDesignId(`local-${newSessionId}`);
+      setStoreDesignId(`local-${newSessionId}`);
       setElements([]);
+      setStoreElements([]);
       setToast('New local drawing session created');
       setTimeout(() => setToast(null), 3000);
       return;
@@ -435,7 +865,9 @@ export default function Canvas() {
       
       if (newDesign) {
         setDesignId(newDesign.id);
+        setStoreDesignId(newDesign.id);
         setElements([]);
+        setStoreElements([]);
         setToast('New drawing session created');
         setTimeout(() => setToast(null), 3000);
       }
@@ -447,7 +879,9 @@ export default function Canvas() {
       const newSessionId = generateUUID();
       setSessionId(newSessionId);
       setDesignId(`local-${newSessionId}`);
+      setStoreDesignId(`local-${newSessionId}`);
       setElements([]);
+      setStoreElements([]);
       setToast('Created local drawing session (offline mode)');
       setTimeout(() => setToast(null), 3000);
     }
@@ -560,6 +994,48 @@ export default function Canvas() {
         </div>
       )}
 
+      {/* Generate Code button */}
+      <div className="absolute top-4 left-1/2 transform -translate-x-1/2 z-50">
+        <button
+          onClick={generateCode}
+          disabled={isGenerating || !elements.length}
+          className={`flex items-center px-4 py-2 rounded-md shadow-md transition-colors duration-200 ${
+            isGenerating ? 'bg-gray-400 cursor-not-allowed' : 'bg-blue-500 hover:bg-blue-600 text-white'
+          }`}
+        >
+          {isGenerating ? (
+            <>
+              <svg className="animate-spin -ml-1 mr-2 h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+              </svg>
+              Generating...
+            </>
+          ) : (
+            'Generate Code'
+          )}
+        </button>
+      </div>
+      
+      {/* Generation error message */}
+      {generationError && (
+        <div className="absolute top-16 left-1/2 transform -translate-x-1/2 bg-red-100 border border-red-400 text-red-700 px-4 py-2 rounded z-50 max-w-md">
+          <p className="font-bold">Generation Error</p>
+          <p className="text-sm">{generationError}</p>
+          <button
+            className="mt-2 bg-blue-500 hover:bg-blue-700 text-white font-bold py-1 px-3 rounded text-sm"
+            onClick={() => {
+              // Clear error and restart
+              setGenerationError(null);
+              setToast('Try drawing again with simpler shapes');
+              setTimeout(() => setToast(null), 3000);
+            }}
+          >
+            Try Again
+          </button>
+        </div>
+      )}
+
       {/* Excalidraw error with retry option */}
       {excalidrawError ? (
         <div className="h-full w-full flex flex-col items-center justify-center">
@@ -584,7 +1060,11 @@ export default function Canvas() {
         <div className="h-full w-full relative">
           <ErrorBoundary onError={handleExcalidrawError}>
             <Excalidraw
-              excalidrawAPI={(api) => (excalidrawRef.current = api)}
+              excalidrawAPI={(api) => {
+                excalidrawRef.current = api;
+                console.log('Excalidraw API loaded:', api);
+                console.log('getSceneElements available:', Boolean(api?.getSceneElements));
+              }}
               onChange={onChangeHandler}
               initialData={{ elements }}
               UIOptions={{

@@ -35,7 +35,23 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   
   // Code editor related state
   code: '',
-  setCode: (code) => set({ code }),
+  setCode: (code) => {
+    // Update store state - don't set default code for empty strings
+    const safeCode = code || '';
+    set({ code: safeCode });
+    
+    // Also save to local storage for persistence
+    try {
+      const { designId } = get();
+      if (designId) {
+        localStorage.setItem(`code_${designId}`, safeCode);
+      }
+      // Always save the most recent code
+      localStorage.setItem('last_generated_code', safeCode);
+    } catch (e) {
+      console.warn('Failed to save code to localStorage:', e);
+    }
+  },
   
   // Shared state
   currentFramework: 'react' as Framework,
@@ -48,19 +64,71 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   // Supabase functions
   updateSupabaseCode: async (code) => {
     const { designId, userId } = get();
-    if (!designId || !userId) return;
+    const safeCode = code || '';
+    
+    if (!designId || !userId) {
+      // Save code to store even if we don't have IDs yet
+      set({ code: safeCode });
+      
+      // Save to localStorage if possible
+      try {
+        localStorage.setItem('last_generated_code', safeCode);
+        if (designId) {
+          localStorage.setItem(`code_${designId}`, safeCode);
+        }
+      } catch (e) {
+        console.warn('Failed to save code to localStorage:', e);
+      }
+      return;
+    }
+    
+    // Save to local storage first for reliability
+    try {
+      localStorage.setItem(`code_${designId}`, safeCode);
+      localStorage.setItem('last_generated_code', safeCode);
+    } catch (e) {
+      console.warn('Failed to save code to localStorage:', e);
+    }
+    
+    // Update store state
+    set({ code: safeCode });
     
     try {
-      await supabase
+      // First try: update using match() instead of eq()
+      const { error: firstError } = await supabase
         .from('designs')
-        .update({
-          code: code,
-          updated_at: new Date().toISOString()
-        })
+        .update({ code })
+        .match({ id: designId });
+        
+      if (!firstError) {
+        // Success with first attempt
+        return;
+      }
+      
+      console.error('First update attempt failed:', firstError);
+      
+      // Second try: update without updated_at using eq()
+      const { error: secondError } = await supabase
+        .from('designs')
+        .update({ code })
         .eq('id', designId);
         
-      // Update local state
-      set({ code });
+      if (!secondError) {
+        // Success with second attempt
+        return;
+      }
+      
+      console.error('Second update attempt failed:', secondError);
+      
+      // Third try: use the updateDesignCode helper from client.ts
+      const { updateDesignCode } = await import('@/lib/supabase/client');
+      const { success, error } = await updateDesignCode(supabase, designId, code);
+      
+      if (success) {
+        return;
+      }
+      
+      throw error || new Error('All update attempts failed');
     } catch (error) {
       console.error('Failed to update code in Supabase:', error);
     }
